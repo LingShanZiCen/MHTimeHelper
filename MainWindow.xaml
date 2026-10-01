@@ -207,6 +207,7 @@
             <Button Content="获取窗口大小" Style="{StaticResource ActionButton}" MinWidth="112" Click="OnGetSizeClick" />
             <Button Content="保存配置" Style="{StaticResource ActionButton}" Click="OnSaveConfigClick" />
             <Button Content="检查更新" Style="{StaticResource ActionButton}" MinWidth="96" Click="OnCheckUpdateClick" />
+            <Button Content="更新日志" Style="{StaticResource ActionButton}" MinWidth="96" Click="OnShowChangeLogClick" />
             <Button Content="GitHub 主页" Style="{StaticResource ActionButton}" MinWidth="108" Click="OnOpenRepoClick" />
             <CheckBox x:Name="ChkAutoUpdate" Content="启动时自动检查更新" VerticalAlignment="Center"
                       Margin="6,0,0,10" ToolTip="开启后每次启动会联网查询 GitHub 上的最新版本"

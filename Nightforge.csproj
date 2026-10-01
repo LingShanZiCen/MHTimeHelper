@@ -12,7 +12,10 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>app.ico</ApplicationIcon>
 
-    <Version>1.0.0</Version>
+    <Version>1.0.1</Version>
+    <AssemblyVersion>1.0.1.0</AssemblyVersion>
+    <FileVersion>1.0.1.0</FileVersion>
+    <InformationalVersion>1.0.1</InformationalVersion>
     <Product>幻夜工坊</Product>
     <AssemblyTitle>幻夜工坊</AssemblyTitle>
     <Description>梦幻西游一键多开与窗口排列助手</Description>

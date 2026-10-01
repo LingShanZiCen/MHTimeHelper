@@ -55,6 +55,60 @@ public partial class MainWindow : Window
         }
 
         InitUpdateCheck();
+        ShowWhatsNewIfUpdated();
+    }
+
+    /// <summary>
+    /// 更新完成后首次启动：上次运行版本比当前版本低时弹出「本次更新内容」；
+    /// 首次安装（没有记录）只写入当前版本不打扰；版本相同不弹窗。
+    /// </summary>
+    private void ShowWhatsNewIfUpdated()
+    {
+        string current = UpdateService.CurrentVersionText;
+        string last = (_config.LastRunVersion ?? "").Trim();
+
+        // 没有记录 = 首次安装：不弹窗，只记下当前版本
+        if (last.Length == 0)
+        {
+            _config.LastRunVersion = current;
+            ConfigService.Save(_config);
+            _log.Add($"首次运行，已记录版本 {current}。");
+            return;
+        }
+
+        Version? lastVersion = UpdateService.ParseVersion(last);
+        Version? currentVersion = UpdateService.ParseVersion(current);
+
+        if (lastVersion is not null && currentVersion is not null && currentVersion > lastVersion)
+        {
+            var dialog = new WhatsNewWindow(current);
+            if (IsVisible)
+            {
+                dialog.Owner = this;
+            }
+
+            dialog.ShowDialog();
+
+            _config.LastRunVersion = current;
+            ConfigService.Save(_config);
+            _log.Add($"已从 {last} 更新到 {current}，已展示本次更新内容。");
+            return;
+        }
+
+        // 版本相同、降级或版本号无法比较：不弹窗，只把记录同步成当前版本，避免每次启动反复判断
+        if (!string.Equals(Normalize(last), Normalize(current), StringComparison.OrdinalIgnoreCase))
+        {
+            _config.LastRunVersion = current;
+            ConfigService.Save(_config);
+            _log.Add($"版本记录已更新为 {current}（上次记录 {last}）。");
+        }
+    }
+
+    /// <summary>「更新日志」按钮：随时查看当前版本的更新内容。</summary>
+    private void OnShowChangeLogClick(object sender, RoutedEventArgs e)
+    {
+        var dialog = new WhatsNewWindow(UpdateService.CurrentVersionText) { Owner = this };
+        dialog.ShowDialog();
     }
 
     /// <summary>启动时联网检查更新：界面先显示，稍后再发起请求，失败只写日志不打扰。</summary>
@@ -194,7 +248,9 @@ public partial class MainWindow : Window
             HotkeyGetSize = TxtHotkeyGetSize.Text.Trim(),
             // 更新检查开关与「不再提示的版本」不属于界面收集项，按当前值透传，避免保存时被重置
             CheckUpdateOnStart = ChkAutoUpdate.IsChecked == true,
-            SkipVersion = _config.SkipVersion
+            SkipVersion = _config.SkipVersion,
+            // 「更新完成后弹窗」依赖的上次运行版本号同样不属于界面收集项，按当前值透传
+            LastRunVersion = _config.LastRunVersion
         };
 
         if (persist)

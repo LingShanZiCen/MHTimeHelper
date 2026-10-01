@@ -50,19 +50,8 @@ internal sealed class UpdateWindow : Window
             FontWeight = FontWeights.SemiBold
         });
 
-        var notes = new TextBox
-        {
-            Text = string.IsNullOrWhiteSpace(info.Notes) ? "（作者未填写更新说明，点击下方按钮前往 GitHub 查看）" : info.Notes,
-            IsReadOnly = true,
-            TextWrapping = TextWrapping.Wrap,
-            AcceptsReturn = true,
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            Height = 170,
-            Padding = new Thickness(8),
-            Background = new SolidColorBrush(Color.FromRgb(0xF7, 0xF8, 0xFA)),
-            BorderBrush = new SolidColorBrush(Color.FromRgb(0xDD, 0xE1, 0xE6))
-        };
-        panel.Children.Add(notes);
+        // 按「新增 / 优化 / 修复」分组展示：每组一个小标题 + 「· 」条目；条目多时在框内滚动
+        panel.Children.Add(ChangeLogPresenter.Build(info.Changes, 260));
 
         panel.Children.Add(new TextBlock
         {

@@ -2,11 +2,12 @@ using System.Net;
 using System.Net.Http;
 using System.Reflection;
 using System.Text.Json;
+using Nightforge.Models;
 
 namespace Nightforge.Services;
 
-/// <summary>远程版本信息。</summary>
-public sealed record UpdateInfo(string Version, string Url, string Notes);
+/// <summary>远程版本信息。Changes 为按「新增 / 优化 / 修复」分类的更新条目。</summary>
+public sealed record UpdateInfo(string Version, string Url, string Notes, List<ChangeItem> Changes);
 
 /// <summary>检查结果：成功给出信息，失败给出原因（网络不通、仓库还没发布等）。</summary>
 public sealed record UpdateCheckResult(UpdateInfo? Info, string? Error)
@@ -194,7 +195,7 @@ public static class UpdateService
 
         string url = GetString(root, "url") ?? ReleasesUrl;
         string notes = GetString(root, "notes") ?? GetString(root, "changelog") ?? "";
-        return new UpdateInfo(version.Trim(), url, notes.Trim());
+        return new UpdateInfo(version.Trim(), url, notes.Trim(), ParseChanges(root, version.Trim(), notes));
     }
 
     private static UpdateInfo? ParseRelease(string json)
@@ -210,8 +211,60 @@ public static class UpdateService
 
         string url = GetString(root, "html_url") ?? ReleasesUrl;
         string notes = GetString(root, "body") ?? "";
-        return new UpdateInfo(tag.Trim(), url, notes.Trim());
+        return new UpdateInfo(tag.Trim(), url, notes.Trim(), ParseChanges(root, tag.Trim(), notes));
     }
+
+    /// <summary>
+    /// 解析更新条目，按优先级取：
+    /// 1) 版本清单里的 changes 数组（元素可以是 "新增：xxx" 字符串，也兼容 { "category": "新增", "text": "xxx" } 对象）；
+    /// 2) 没有 changes 就把 notes / release 正文按行拆分；
+    /// 3) 两者都为空时回退到程序内置日志，保证弹窗永远有内容可展示。
+    /// </summary>
+    private static List<ChangeItem> ParseChanges(JsonElement root, string version, string notes)
+    {
+        var items = new List<ChangeItem>();
+
+        if (root.TryGetProperty("changes", out JsonElement changes) && changes.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement element in changes.EnumerateArray())
+            {
+                if (element.ValueKind == JsonValueKind.String)
+                {
+                    string? line = element.GetString();
+                    if (!string.IsNullOrWhiteSpace(line))
+                    {
+                        items.AddRange(ChangeLog.Parse([line]));
+                    }
+                }
+                else if (element.ValueKind == JsonValueKind.Object)
+                {
+                    string? category = GetString(element, "category") ?? GetString(element, "type");
+                    string? text = GetString(element, "text") ?? GetString(element, "content") ?? GetString(element, "title");
+                    if (!string.IsNullOrWhiteSpace(text))
+                    {
+                        items.Add(new ChangeItem(
+                            string.IsNullOrWhiteSpace(category) ? ChangeLog.DefaultCategory : category.Trim(),
+                            text.Trim()));
+                    }
+                }
+            }
+        }
+
+        if (items.Count == 0)
+        {
+            items.AddRange(ChangeLog.Parse(SplitLines(notes)));
+        }
+
+        if (items.Count == 0)
+        {
+            items.AddRange(ChangeLog.Get(version));
+        }
+
+        return items;
+    }
+
+    private static IEnumerable<string> SplitLines(string? text)
+        => string.IsNullOrEmpty(text) ? [] : text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
 
     private static string? GetString(JsonElement element, string name)
         => element.TryGetProperty(name, out JsonElement value) && value.ValueKind == JsonValueKind.String

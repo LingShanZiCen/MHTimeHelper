@@ -24,6 +24,9 @@ public sealed class AppConfig
     /// <summary>用户点过「本版本不再提示」的版本号，对该版本不再弹窗。</summary>
     public string SkipVersion { get; set; } = "";
 
+    /// <summary>上一次运行时的程序版本号，用于识别「更新完成后首次启动」并弹出本次更新内容。</summary>
+    public string LastRunVersion { get; set; } = "";
+
     // ---- [Hotkeys] ----
     // 默认值需避开系统与其他软件已占用的组合（如 Ctrl+Alt+M / Ctrl+Alt+R 常被占用，注册会失败）
     public string HotkeyFront { get; set; } = "Ctrl+Alt+T";

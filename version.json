@@ -1,0 +1,5 @@
+{
+  "version": "1.0.0",
+  "url": "https://github.com/LingShanZiCen/MHTimeHelper/releases",
+  "notes": "幻夜工坊 1.0.0（首个 C# 版本）\n\n· 全新 C# / WPF 重写，一键多开、窗口排列、前置全部、老板键、热键全保留\n· 配置沿用旧版 config.ini，老用户把旧配置文件放在程序旁边即可直接使用\n· 新增启动时联网检查更新，发现新版本会弹窗提示并可一键前往 GitHub 下载"
+}

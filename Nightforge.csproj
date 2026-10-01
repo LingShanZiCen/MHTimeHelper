@@ -1,0 +1,40 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>Nightforge</AssemblyName>
+    <RootNamespace>Nightforge</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+
+    <Version>1.0.0</Version>
+    <Product>幻夜工坊</Product>
+    <AssemblyTitle>幻夜工坊</AssemblyTitle>
+    <Description>梦幻西游一键多开与窗口排列助手</Description>
+    <Company>LingShanZiCen</Company>
+    <Copyright>Copyright (c) 2026</Copyright>
+
+    <!-- WFO0003：WinForms 分析器建议用 ApplicationHighDpiMode 替代 manifest 中的 DPI 设置。
+         本项目以 WPF 为宿主，DPI 感知仍由 app.manifest 声明，故抑制该提示。 -->
+    <NoWarn>$(NoWarn);WFO0003</NoWarn>
+
+    <SatelliteResourceLanguages>zh-Hans</SatelliteResourceLanguages>
+    <DebugType>none</DebugType>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <!-- 关掉 WinForms 的隐式全局 using，避免与 WPF 类型（Application / CheckBox / TextBox / KeyEventArgs 等）名字冲突。
+       托盘图标等 WinForms 类型在源码中通过 WinForms 别名显式引用。 -->
+  <ItemGroup>
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+    <!-- 供 Window.Icon 与托盘图标在运行时读取（与 ApplicationIcon 用的是同一张图） -->
+    <Resource Include="app.ico" />
+  </ItemGroup>
+
+</Project>

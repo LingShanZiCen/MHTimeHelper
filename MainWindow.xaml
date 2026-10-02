@@ -212,6 +212,9 @@
             <CheckBox x:Name="ChkAutoUpdate" Content="启动时自动检查更新" VerticalAlignment="Center"
                       Margin="6,0,0,10" ToolTip="开启后每次启动会联网查询 GitHub 上的最新版本"
                       Click="OnAutoUpdateChanged" />
+            <CheckBox x:Name="ChkAutoDownload" Content="自动下载更新" VerticalAlignment="Center"
+                      Margin="10,0,0,10" ToolTip="发现新版本时后台下好整包，重启即换成新版；关闭则只提示下载地址"
+                      Click="OnAutoDownloadChanged" />
         </WrapPanel>
     </Grid>
 </Window>

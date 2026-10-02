@@ -6,8 +6,22 @@ using Nightforge.Models;
 
 namespace Nightforge.Services;
 
-/// <summary>远程版本信息。Changes 为按「新增 / 优化 / 修复」分类的更新条目。</summary>
-public sealed record UpdateInfo(string Version, string Url, string Notes, List<ChangeItem> Changes);
+/// <summary>
+/// 远程版本信息。Changes 为按「新增 / 优化 / 修复」分类的更新条目；
+/// ExeUrl / Sha256 / Size 供「静默自动更新」下载并校验用，缺失时只能退回手动下载。
+/// </summary>
+public sealed record UpdateInfo(
+    string Version,
+    string Url,
+    string Notes,
+    List<ChangeItem> Changes,
+    string ExeUrl = "",
+    string Sha256 = "",
+    long Size = 0)
+{
+    /// <summary>是否具备自动下载的条件（至少要给出 exe 直链）。</summary>
+    public bool CanAutoDownload => !string.IsNullOrWhiteSpace(ExeUrl);
+}
 
 /// <summary>检查结果：成功给出信息，失败给出原因（网络不通、仓库还没发布等）。</summary>
 public sealed record UpdateCheckResult(UpdateInfo? Info, string? Error)
@@ -195,7 +209,13 @@ public static class UpdateService
 
         string url = GetString(root, "url") ?? ReleasesUrl;
         string notes = GetString(root, "notes") ?? GetString(root, "changelog") ?? "";
-        return new UpdateInfo(version.Trim(), url, notes.Trim(), ParseChanges(root, version.Trim(), notes));
+        // 版本清单里可以直接给出 exe 直链、摘要与体积，静默更新据此下载并校验
+        string exeUrl = GetString(root, "exeUrl") ?? GetString(root, "exe_url") ?? "";
+        string sha256 = GetString(root, "sha256") ?? "";
+        long size = GetLong(root, "size");
+        return new UpdateInfo(
+            version.Trim(), url, notes.Trim(), ParseChanges(root, version.Trim(), notes),
+            exeUrl.Trim(), sha256.Trim(), size);
     }
 
     private static UpdateInfo? ParseRelease(string json)
@@ -211,8 +231,59 @@ public static class UpdateService
 
         string url = GetString(root, "html_url") ?? ReleasesUrl;
         string notes = GetString(root, "body") ?? "";
-        return new UpdateInfo(tag.Trim(), url, notes.Trim(), ParseChanges(root, tag.Trim(), notes));
+        // 备用通道：从 Release 的 assets 里找 exe，拿到直链、大小与 GitHub 给出的 sha256 摘要
+        (string exeUrl, string sha256, long size) = ParseAsset(root);
+        return new UpdateInfo(
+            tag.Trim(), url, notes.Trim(), ParseChanges(root, tag.Trim(), notes),
+            exeUrl, sha256, size);
     }
+
+    /// <summary>从 Release 的 assets 中挑第一个 .exe：返回下载直链、sha256（接口给出时）与字节大小。</summary>
+    private static (string ExeUrl, string Sha256, long Size) ParseAsset(JsonElement root)
+    {
+        if (!root.TryGetProperty("assets", out JsonElement assets) || assets.ValueKind != JsonValueKind.Array)
+        {
+            return ("", "", 0);
+        }
+
+        foreach (JsonElement asset in assets.EnumerateArray())
+        {
+            string? name = GetString(asset, "name");
+            if (string.IsNullOrWhiteSpace(name) || !name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            string url = GetString(asset, "browser_download_url") ?? "";
+            if (url.Length == 0)
+            {
+                continue;
+            }
+
+            long size = asset.TryGetProperty("size", out JsonElement sizeElement)
+                && sizeElement.ValueKind == JsonValueKind.Number
+                && sizeElement.TryGetInt64(out long value)
+                    ? value
+                    : 0;
+
+            // 新版 GitHub 接口会带 digest（形如 "sha256:xxxx"），老接口没有就留空，由下载侧降级为只校验大小
+            string digest = GetString(asset, "digest") ?? "";
+            string sha256 = digest.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase)
+                ? digest["sha256:".Length..].Trim()
+                : "";
+
+            return (url, sha256, size);
+        }
+
+        return ("", "", 0);
+    }
+
+    private static long GetLong(JsonElement element, string name)
+        => element.TryGetProperty(name, out JsonElement value)
+           && value.ValueKind == JsonValueKind.Number
+           && value.TryGetInt64(out long number)
+            ? number
+            : 0;
 
     /// <summary>
     /// 解析更新条目，按优先级取：

@@ -43,6 +43,9 @@ public static class ConfigService
         cfg.CheckUpdateOnStart = GetInt(SettingsSection, "CheckUpdateOnStart", cfg.CheckUpdateOnStart ? 1 : 0, path) != 0;
         cfg.SkipVersion = GetString(SettingsSection, "SkipVersion", cfg.SkipVersion, path);
         cfg.LastRunVersion = GetString(SettingsSection, "LastRunVersion", cfg.LastRunVersion, path);
+        cfg.AutoDownloadUpdate = GetInt(SettingsSection, "AutoDownloadUpdate", cfg.AutoDownloadUpdate ? 1 : 0, path) != 0;
+        cfg.PendingUpdateVersion = GetString(SettingsSection, "PendingUpdateVersion", cfg.PendingUpdateVersion, path);
+        cfg.PendingUpdateFile = GetString(SettingsSection, "PendingUpdateFile", cfg.PendingUpdateFile, path);
 
         cfg.HotkeyFront = GetString(HotkeysSection, "Front", cfg.HotkeyFront, path);
         cfg.HotkeyMinimize = GetString(HotkeysSection, "Minimize", cfg.HotkeyMinimize, path);
@@ -74,6 +77,9 @@ public static class ConfigService
         WriteString(SettingsSection, "CheckUpdateOnStart", cfg.CheckUpdateOnStart ? "1" : "0", path);
         WriteString(SettingsSection, "SkipVersion", cfg.SkipVersion, path);
         WriteString(SettingsSection, "LastRunVersion", cfg.LastRunVersion, path);
+        WriteString(SettingsSection, "AutoDownloadUpdate", cfg.AutoDownloadUpdate ? "1" : "0", path);
+        WriteString(SettingsSection, "PendingUpdateVersion", cfg.PendingUpdateVersion, path);
+        WriteString(SettingsSection, "PendingUpdateFile", cfg.PendingUpdateFile, path);
 
         WriteString(HotkeysSection, "Front", cfg.HotkeyFront, path);
         WriteString(HotkeysSection, "Minimize", cfg.HotkeyMinimize, path);

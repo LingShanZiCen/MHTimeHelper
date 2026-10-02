@@ -22,6 +22,7 @@ public partial class MainWindow : Window
     private bool _reallyExit;
     private bool _busy;
     private bool _checkingUpdate;
+    private bool _downloadingUpdate;
     private DispatcherTimer? _updateTimer;
 
     public MainWindow()
@@ -56,6 +57,11 @@ public partial class MainWindow : Window
 
         InitUpdateCheck();
         ShowWhatsNewIfUpdated();
+
+        if (SilentUpdateService.HasPendingUpdate(_config))
+        {
+            _log.Add($"新版本 {_config.PendingUpdateVersion} 已下载完成，下次启动会自动替换（也可点「检查更新」重新确认）。");
+        }
     }
 
     /// <summary>
@@ -226,6 +232,7 @@ public partial class MainWindow : Window
         TxtHotkeyMinimize.Text = _config.HotkeyMinimize;
         TxtHotkeyGetSize.Text = _config.HotkeyGetSize;
         ChkAutoUpdate.IsChecked = _config.CheckUpdateOnStart;
+        ChkAutoDownload.IsChecked = _config.AutoDownloadUpdate;
 
         UpdateResControls();
     }
@@ -250,7 +257,11 @@ public partial class MainWindow : Window
             CheckUpdateOnStart = ChkAutoUpdate.IsChecked == true,
             SkipVersion = _config.SkipVersion,
             // 「更新完成后弹窗」依赖的上次运行版本号同样不属于界面收集项，按当前值透传
-            LastRunVersion = _config.LastRunVersion
+            LastRunVersion = _config.LastRunVersion,
+            // 自动下载开关是界面项；已下载待重启的更新登记也不能被保存冲掉
+            AutoDownloadUpdate = ChkAutoDownload.IsChecked == true,
+            PendingUpdateVersion = _config.PendingUpdateVersion,
+            PendingUpdateFile = _config.PendingUpdateFile
         };
 
         if (persist)
@@ -644,6 +655,15 @@ public partial class MainWindow : Window
         }
     }
 
+    private void OnAutoDownloadChanged(object sender, RoutedEventArgs e)
+    {
+        _config.AutoDownloadUpdate = ChkAutoDownload.IsChecked == true;
+        ConfigService.Save(_config);
+        _log.Add(_config.AutoDownloadUpdate
+            ? "已开启自动下载更新：发现新版本会后台下好，重启后自动换成新版。"
+            : "已关闭自动下载更新：发现新版本只提示，由你自行下载。");
+    }
+
     /// <summary>
     /// 联网查询 GitHub 最新版本。silent=true 时只在发现新版本才弹窗，其余情况只写日志。
     /// 全程不抛异常，网络不通也只是提示一下，绝不拖垮主程序。
@@ -695,22 +715,16 @@ public partial class MainWindow : Window
                 return;
             }
 
+            // 开了「自动下载更新」就走静默全量更新：后台整包下好，重启即换新版，不再打断用户
+            if (_config.AutoDownloadUpdate)
+            {
+                _log.Add($"发现新版本：{info.Version}（当前 {current}），开始后台下载。");
+                _ = DownloadUpdateAsync(info, current, manual: !silent);
+                return;
+            }
+
             _log.Add($"发现新版本：{info.Version}（当前 {current}），已弹出更新提示。");
-
-            var dialog = new UpdateWindow(info, current);
-            if (IsVisible)
-            {
-                dialog.Owner = this;
-            }
-
-            dialog.ShowDialog();
-
-            if (dialog.SkippedVersion is not null)
-            {
-                _config.SkipVersion = dialog.SkippedVersion;
-                ConfigService.Save(_config);
-                _log.Add($"已设置不再提示版本 {dialog.SkippedVersion}。");
-            }
+            ShowManualUpdateDialog(info, current);
         }
         catch (Exception ex)
         {
@@ -719,6 +733,105 @@ public partial class MainWindow : Window
         finally
         {
             _checkingUpdate = false;
+        }
+    }
+
+    /// <summary>
+    /// 后台下载新版本并在完成后登记为「待应用」，重启即换新版（全量静默更新的第一段）。
+    /// 任何失败都不影响当前使用：手动检查时退回更新提示窗，静默场景只写日志。
+    /// </summary>
+    private async Task DownloadUpdateAsync(UpdateInfo info, string current, bool manual)
+    {
+        if (_downloadingUpdate)
+        {
+            _log.Add("新版本正在下载中，请稍候。");
+            return;
+        }
+
+        _downloadingUpdate = true;
+        try
+        {
+            if (!info.CanAutoDownload)
+            {
+                _log.Add("服务器未提供新版安装包地址，改为手动下载。");
+                if (manual)
+                {
+                    ShowManualUpdateDialog(info, current);
+                }
+
+                return;
+            }
+
+            // 目录不可写（Program Files、只读盘等）时没法自替换，只能退回手动下载
+            if (!SilentUpdateService.IsAppDirectoryWritable())
+            {
+                _log.Add("程序目录不可写，无法自动更新，请手动下载新版。");
+                if (manual)
+                {
+                    MessageBox.Show(
+                        $"程序所在目录不可写，无法自动更新。\n\n请手动下载新版：{UpdateService.ReleasesUrl}",
+                        "检查更新", MessageBoxButton.OK, MessageBoxImage.Information);
+                    ShowManualUpdateDialog(info, current);
+                }
+
+                return;
+            }
+
+            string? error = await SilentUpdateService.DownloadAsync(info, line => _log.Add(line));
+            if (error is not null)
+            {
+                _log.Add($"自动下载失败：{error}，可手动下载。");
+                if (manual)
+                {
+                    ShowManualUpdateDialog(info, current);
+                }
+
+                return;
+            }
+
+            SilentUpdateService.MarkPending(_config, info.Version);
+            _log.Add($"新版本 {info.Version} 已下载完成，重启后自动换成新版。");
+
+            var ready = new UpdateReadyWindow(info.Version, current);
+            if (IsVisible)
+            {
+                ready.Owner = this;
+            }
+
+            ready.ShowDialog();
+
+            if (ready.RestartNow)
+            {
+                _log.Add("正在重启以应用新版本...");
+                App.RestartApplication();
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.Add($"自动更新出错：{ex.Message}");
+        }
+        finally
+        {
+            _downloadingUpdate = false;
+        }
+    }
+
+    /// <summary>手动更新通道：弹出更新提示窗，跳 GitHub 下载页；用户可勾「本版本不再提示」。</summary>
+    private void ShowManualUpdateDialog(UpdateInfo info, string current)
+    {
+        var dialog = new UpdateWindow(info, current);
+        if (IsVisible)
+        {
+            dialog.Owner = this;
+        }
+
+        dialog.ShowDialog();
+
+        if (dialog.SkippedVersion is not null)
+        {
+            _config.SkipVersion = dialog.SkippedVersion;
+            ConfigService.Save(_config);
+            _log.Add($"已设置不再提示版本 {dialog.SkippedVersion}。");
         }
     }
 

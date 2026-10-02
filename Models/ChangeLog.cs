@@ -35,12 +35,21 @@ public static class ChangeLog
     /// <summary>固定展示顺序：新增、优化、修复、更新。</summary>
     public static IReadOnlyList<string> Categories { get; } = ["新增", "优化", "修复", DefaultCategory];
 
+    private const string Version102 = "1.0.2";
     private const string Version101 = "1.0.1";
     private const string Version100 = "1.0.0";
 
     /// <summary>内置日志：版本号（不含 v 前缀）→ 条目原文。</summary>
     private static readonly Dictionary<string, string[]> BuiltIn = new(StringComparer.OrdinalIgnoreCase)
     {
+        [Version102] =
+        [
+            "新增：自动下载更新——发现新版本后在后台把新版整包下好，下次打开软件自动换成新版，不用再去网页下载",
+            "新增：设置里新增「自动下载更新」开关，关闭后仍只提示下载地址，由你自行决定",
+            "新增：新版下载完成后可选择「立即重启更新」马上生效，或「下次启动更新」不打断当前使用",
+            "优化：新版下载完成后自动校验文件大小与 SHA-256，校验不通过直接丢弃并保留旧版本",
+            "优化：程序放在只读目录或没有写入权限时，自动退回「跳转网页手动下载」，不再卡住",
+        ],
         [Version101] =
         [
             "新增：软件更新后首次启动自动弹出「本次更新内容」窗口，清楚列出这一版更新了什么、优化了什么",

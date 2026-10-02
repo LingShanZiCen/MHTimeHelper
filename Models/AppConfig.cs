@@ -27,6 +27,15 @@ public sealed class AppConfig
     /// <summary>上一次运行时的程序版本号，用于识别「更新完成后首次启动」并弹出本次更新内容。</summary>
     public string LastRunVersion { get; set; } = "";
 
+    /// <summary>发现新版本时后台自动下载，下次启动自动换成新版；关闭则只提示、由用户手动下载。</summary>
+    public bool AutoDownloadUpdate { get; set; } = true;
+
+    /// <summary>已下载完成、等待重启替换的版本号（空表示没有待应用的更新）。</summary>
+    public string PendingUpdateVersion { get; set; } = "";
+
+    /// <summary>待应用更新文件的完整路径，正常情况下是程序目录下 update\Nightforge_new.exe。</summary>
+    public string PendingUpdateFile { get; set; } = "";
+
     // ---- [Hotkeys] ----
     // 默认值需避开系统与其他软件已占用的组合（如 Ctrl+Alt+M / Ctrl+Alt+R 常被占用，注册会失败）
     public string HotkeyFront { get; set; } = "Ctrl+Alt+T";

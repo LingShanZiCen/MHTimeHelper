@@ -12,10 +12,10 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>app.ico</ApplicationIcon>
 
-    <Version>1.0.2</Version>
-    <AssemblyVersion>1.0.2.0</AssemblyVersion>
-    <FileVersion>1.0.2.0</FileVersion>
-    <InformationalVersion>1.0.2</InformationalVersion>
+    <Version>1.0.3</Version>
+    <AssemblyVersion>1.0.3.0</AssemblyVersion>
+    <FileVersion>1.0.3.0</FileVersion>
+    <InformationalVersion>1.0.3</InformationalVersion>
     <Product>幻夜工坊</Product>
     <AssemblyTitle>幻夜工坊</AssemblyTitle>
     <Description>梦幻西游一键多开与窗口排列助手</Description>
@@ -38,6 +38,8 @@
     <Using Remove="System.Drawing" />
     <!-- 供 Window.Icon 与托盘图标在运行时读取（与 ApplicationIcon 用的是同一张图） -->
     <Resource Include="app.ico" />
+    <!-- 标题栏左上角图标（与 app.ico 同一张图，WPF 用 PNG 缩放质量好于 ICO） -->
+    <Resource Include="app-icon.png" />
   </ItemGroup>
 
 </Project>

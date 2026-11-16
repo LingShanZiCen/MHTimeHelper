@@ -14,8 +14,17 @@ public sealed class AppConfig
     public int WinWidth { get; set; } = 800;
     public int WinHeight { get; set; } = 600;
     public int WaitSec { get; set; } = 7;
-    public string ResMode { get; set; } = "自定义宽高";
+    public string ResMode { get; set; } = "自动适配（按比例）";
     public string ResPreset { get; set; } = "1920x1080";
+
+    /// <summary>窗口之间的空隙（像素）。0 表示窗口彼此紧贴。</summary>
+    public int WindowGap { get; set; } = 0;
+
+    /// <summary>
+    /// 游戏画面比例，取值为 <see cref="AspectRatioOption.Key"/>，
+    /// 与游戏自己存在 UserDefault.xml 里的 DeviceScreenResolution 同一个字符串。
+    /// </summary>
+    public string AspectRatio { get; set; } = "Ratio16to9";
 
     // ---- [Settings] 更新检查 ----
     /// <summary>启动时联网检查 GitHub 上是否有新版本。</summary>
@@ -50,9 +59,9 @@ public sealed class AppConfig
         "1920x1080", "1600x900", "1440x900", "1280x720", "1024x768"
     ];
 
-    /// <summary>分辨率模式可选项。</summary>
+    /// <summary>分辨率模式可选项。第一项为默认值。</summary>
     public static readonly string[] ModeOptions =
     [
-        "自定义宽高", "使用预设", "不改变窗口大小"
+        "自动适配（按比例）", "自定义宽高", "使用预设", "不改变窗口大小"
     ];
 }

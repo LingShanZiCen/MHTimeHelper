@@ -1,9 +1,11 @@
 ﻿using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Threading;
 using Nightforge.Models;
 using Nightforge.Services;
@@ -15,6 +17,7 @@ public partial class MainWindow : Window
 {
     private readonly LogService _log = new();
     private readonly WindowService _windows;
+    private readonly GameShutdownService _shutdown = new();
     private HotkeyService? _hotkeys;
     private WinForms.NotifyIcon? _tray;
     private AppConfig _config = new();
@@ -32,6 +35,7 @@ public partial class MainWindow : Window
         _log.LineAdded += AppendLog;
         Loaded += OnLoaded;
         Closing += OnClosing;
+        StateChanged += OnWindowStateChanged;
     }
 
     // ================= 初始化 =================
@@ -41,13 +45,16 @@ public partial class MainWindow : Window
         CmbCount.ItemsSource = Enumerable.Range(1, 5).Select(i => i.ToString()).ToList();
         CmbResMode.ItemsSource = AppConfig.ModeOptions;
         CmbResPreset.ItemsSource = AppConfig.PresetOptions;
+        CmbAspect.ItemsSource = AspectRatioOption.All;
 
         // 必须先读配置再注册：SourceInitialized 阶段文本框还是空的，会把空手势当成快捷键
         LoadConfigToUi();
+        SyncRatioFromGame(silent: true);
         InitHotkeys();
         InitTray();
         UpdateAdminBanner();
 
+        TxtVersion.Text = $"v{UpdateService.CurrentVersionText}";
         _log.Add($"幻夜工坊已启动（版本 {UpdateService.CurrentVersionText}）。");
         _log.Add($"配置文件：{ConfigService.ConfigPath}");
         if (!IsAdministrator())
@@ -227,6 +234,8 @@ public partial class MainWindow : Window
         TxtWaitSec.Text = _config.WaitSec.ToString();
         CmbResMode.SelectedItem = AppConfig.ModeOptions.Contains(_config.ResMode) ? _config.ResMode : AppConfig.ModeOptions[0];
         CmbResPreset.SelectedItem = AppConfig.PresetOptions.Contains(_config.ResPreset) ? _config.ResPreset : AppConfig.PresetOptions[0];
+        CmbAspect.SelectedItem = AspectRatioOption.FromKeyOrDefault(_config.AspectRatio);
+        TxtWinGap.Text = _config.WindowGap.ToString();
         TxtSyncPath.Text = _config.SyncPath;
         TxtHotkeyFront.Text = _config.HotkeyFront;
         TxtHotkeyMinimize.Text = _config.HotkeyMinimize;
@@ -249,6 +258,8 @@ public partial class MainWindow : Window
             WaitSec = Math.Clamp(ParseInt(TxtWaitSec.Text, 7), 1, 120),
             ResMode = CmbResMode.SelectedItem as string ?? AppConfig.ModeOptions[0],
             ResPreset = CmbResPreset.SelectedItem as string ?? AppConfig.PresetOptions[0],
+            WindowGap = Math.Clamp(ParseInt(TxtWinGap.Text, 0), 0, LayoutCalculator.MaxGap),
+            AspectRatio = (CmbAspect.SelectedItem as AspectRatioOption)?.Key ?? AspectRatioOption.Default.Key,
             SyncPath = TxtSyncPath.Text.Trim().Trim('"'),
             HotkeyFront = TxtHotkeyFront.Text.Trim(),
             HotkeyMinimize = TxtHotkeyMinimize.Text.Trim(),
@@ -400,6 +411,9 @@ public partial class MainWindow : Window
             _log.AddSeparator();
             _log.Add($"一键启动：{cfg.LastCount} 个窗口，关键词「{cfg.WinTitle}」");
 
+            // 先落盘画面比例：游戏只有在启动时才会读这个值，启动之后再改就没用了
+            ApplyRatioBeforeLaunch(cfg);
+
             _gameWindows = await _windows.LaunchMultipleAsync(
                 cfg.GamePath, cfg.WinTitle, cfg.LastCount, cfg.WaitSec, _log.Add, CancellationToken.None);
 
@@ -422,32 +436,151 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// 按当前设置算出一套排布并把窗口摆上去。
+    /// 自动适配模式下窗口尺寸由「数量 + 画面比例 + 屏幕工作区」反算，
+    /// 保证既不重叠、也不超出屏幕，且每个窗口的客户区正好等于所选比例。
+    /// </summary>
     private void ArrangeWindows(AppConfig cfg, IReadOnlyList<IntPtr> windows)
     {
-        bool resize = cfg.ResMode != "不改变窗口大小";
-        int width = cfg.WinWidth;
-        int height = cfg.WinHeight;
-
-        if (cfg.ResMode == "使用预设")
+        if (windows.Count == 0)
         {
-            string[] parts = cfg.ResPreset.Split('x', 'X');
-            if (parts.Length == 2 && int.TryParse(parts[0], out int pw) && int.TryParse(parts[1], out int ph))
-            {
-                width = pw;
-                height = ph;
-            }
+            return;
         }
 
-        if (windows.Count == 5)
+        WindowService.WorkArea area = _windows.GetWorkArea();
+        AspectRatioOption ratio = AspectRatioOption.FromKeyOrDefault(cfg.AspectRatio);
+        bool resize = cfg.ResMode != "不改变窗口大小";
+        int gap = cfg.WindowGap;
+
+        LayoutPlan plan;
+        string modeText;
+
+        if (cfg.ResMode == "自动适配（按比例）")
         {
-            _windows.ArrangeFive(windows, width, height, resize);
+            plan = LayoutCalculator.AutoFit(
+                windows.Count, area.Left, area.Top, area.Width, area.Height,
+                ratio.RatioW, ratio.RatioH, gap);
+            modeText = $"自动适配 · {ratio.Name}";
+        }
+        else if (cfg.ResMode == "不改变窗口大小")
+        {
+            (int width, int height) = LargestClientSize(windows);
+            plan = LayoutCalculator.Fixed(
+                windows.Count, area.Left, area.Top, area.Width, area.Height, width, height, gap);
+            modeText = $"保持原大小 {width}×{height}";
         }
         else
         {
-            _windows.ArrangeGrid(windows, width, height, resize);
+            int width = cfg.WinWidth;
+            int height = cfg.WinHeight;
+
+            if (cfg.ResMode == "使用预设")
+            {
+                string[] parts = cfg.ResPreset.Split('x', 'X');
+                if (parts.Length == 2 && int.TryParse(parts[0], out int pw) && int.TryParse(parts[1], out int ph))
+                {
+                    width = pw;
+                    height = ph;
+                }
+            }
+
+            plan = LayoutCalculator.Fixed(
+                windows.Count, area.Left, area.Top, area.Width, area.Height, width, height, gap);
+            modeText = $"固定 {width}×{height}";
         }
 
-        _log.Add($"排列完成（{windows.Count} 个窗口，{(resize ? "含调整大小" : "仅移动位置")}）。");
+        if (plan.IsEmpty)
+        {
+            _log.Add("排列失败：没能算出可用的窗口位置，请检查窗口宽高与间距是否合理。");
+            return;
+        }
+
+        int moved = _windows.ApplyLayout(windows, plan, resize);
+        _log.Add($"排列完成（{modeText}，{plan.Columns} 列 × {plan.Rows} 行，"
+                 + $"每窗口客户区 {plan.WindowWidth}×{plan.WindowHeight}，成功 {moved} / {windows.Count} 个）。");
+
+        WarnIfCrowded(plan, area, windows.Count, ratio, gap);
+    }
+
+    /// <summary>
+    /// 排列结果如果有重叠或跑出屏幕，在日志里说清楚怎么改，
+    /// 顺带把「自动适配」下会得到的尺寸算出来，省得用户自己试。
+    /// </summary>
+    private void WarnIfCrowded(
+        LayoutPlan plan,
+        WindowService.WorkArea area,
+        int count,
+        AspectRatioOption ratio,
+        int gap)
+    {
+        bool overlap = LayoutCalculator.TryFindOverlap(plan.Slots, out _, out _);
+        bool outside = plan.Slots.Any(s => LayoutCalculator.IsOutside(s, area.Left, area.Top, area.Width, area.Height));
+
+        if (!overlap && !outside)
+        {
+            return;
+        }
+
+        _log.Add(overlap
+            ? "提示：当前尺寸下窗口会互相压住，把「分辨率模式」改成「自动适配（按比例）」，或调小窗口宽高/间距。"
+            : "提示：有窗口排到了屏幕之外，把「分辨率模式」改成「自动适配（按比例）」，或调小窗口宽高。");
+
+        LayoutPlan suggestion = LayoutCalculator.AutoFit(
+            count, area.Left, area.Top, area.Width, area.Height, ratio.RatioW, ratio.RatioH, gap);
+
+        if (!suggestion.IsEmpty)
+        {
+            _log.Add($"参考：按自动适配计算，{count} 个窗口每个可用 "
+                     + $"{suggestion.WindowWidth}×{suggestion.WindowHeight}（{suggestion.Columns} 列 × {suggestion.Rows} 行），不会重叠。");
+        }
+    }
+
+    /// <summary>「不改变窗口大小」模式下用全部窗口里最大的客户区尺寸来算格子，避免各自大小不一时挤在一起。</summary>
+    private (int Width, int Height) LargestClientSize(IReadOnlyList<IntPtr> windows)
+    {
+        int width = 0;
+        int height = 0;
+        foreach (IntPtr hwnd in windows)
+        {
+            (int cw, int ch) = _windows.GetClientSize(hwnd);
+            width = Math.Max(width, cw);
+            height = Math.Max(height, ch);
+        }
+
+        return width > 0 && height > 0 ? (width, height) : (800, 600);
+    }
+
+    /// <summary>启动游戏前把画面比例写进游戏设置；写不进去只记日志，不拦着启动。</summary>
+    private void ApplyRatioBeforeLaunch(AppConfig cfg)
+    {
+        AspectRatioOption ratio = AspectRatioOption.FromKeyOrDefault(cfg.AspectRatio);
+        GameProfileService.TryWriteRatio(cfg.GamePath, ratio, out string message);
+        _log.Add($"画面比例：{message}");
+    }
+
+    /// <summary>把游戏设置文件里的当前比例读回界面。</summary>
+    private void SyncRatioFromGame(bool silent)
+    {
+        string gamePath = TxtGamePath.Text.Trim().Trim('"');
+        AspectRatioOption? actual = GameProfileService.ReadRatio(gamePath);
+
+        if (actual is null)
+        {
+            if (!silent)
+            {
+                _log.Add("读取画面比例失败：没找到游戏设置文件 LocalData\\UserDefault.xml，请确认游戏路径。");
+            }
+
+            return;
+        }
+
+        CmbAspect.SelectedItem = actual;
+        bool changed = !string.Equals(actual.Key, _config.AspectRatio, StringComparison.OrdinalIgnoreCase);
+        if (!silent || changed)
+        {
+            _log.Add($"已从游戏读取画面比例：{actual.Name}。");
+        }
     }
 
     private void OnBringAllClick(object sender, RoutedEventArgs e) => BringAllWindows("按钮");
@@ -463,6 +596,62 @@ public partial class MainWindow : Window
 
         int ok = _windows.BringAllToFront(windows);
         _log.Add($"前置全部（{source}）：{ok} / {windows.Count} 个窗口已置顶。");
+    }
+
+    /// <summary>
+    /// 一键退出游戏：对每个游戏窗口模拟点右上角 ×，再自动把弹出的确认框点掉。
+    /// 逐个处理并实时写日志，中途能看到卡在哪一个窗口。
+    /// </summary>
+    private async void OnShutdownGamesClick(object sender, RoutedEventArgs e)
+    {
+        if (_busy)
+        {
+            _log.Add("正在执行其它操作，请稍候再退出游戏。");
+            return;
+        }
+
+        List<IntPtr> windows = RefreshWindows();
+        if (windows.Count == 0)
+        {
+            _log.Add("一键退出游戏：没有找到匹配的窗口。");
+            return;
+        }
+
+        WarnIfWindowCountOff(windows);
+
+        MessageBoxResult confirm = MessageBox.Show(
+            $"确定要退出全部 {windows.Count} 个游戏窗口吗？\n\n"
+            + "会先模拟点右上角 ×，游戏弹出确认框后自动点「确定」；\n"
+            + "只有正常退出不生效时才会强制结束进程。",
+            "一键退出游戏", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+
+        if (confirm != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        _busy = true;
+        try
+        {
+            _log.AddSeparator();
+            _log.Add($"一键退出游戏：共 {windows.Count} 个窗口");
+
+            GameShutdownService.Summary summary =
+                await _shutdown.ShutdownAsync(windows, _log.Add, CancellationToken.None);
+
+            _log.Add($"退出完成：正常退出 {summary.Graceful} 个，强制结束 {summary.Forced} 个"
+                     + (summary.Failed > 0 ? $"，失败 {summary.Failed} 个" : string.Empty)
+                     + $"，耗时 {summary.Seconds:F1} 秒。");
+            _gameWindows = [];
+        }
+        catch (Exception ex)
+        {
+            _log.Add($"一键退出游戏出错：{ex.Message}");
+        }
+        finally
+        {
+            _busy = false;
+        }
     }
 
     private void OnBossKeyClick(object sender, RoutedEventArgs e) => MinimizeAllWindows("按钮");
@@ -505,16 +694,49 @@ public partial class MainWindow : Window
         _log.Add($"获取窗口大小（{source}）：{size.Width} × {size.Height}，已回填到界面。");
     }
 
+    /// <summary>
+    /// 取当前所有游戏窗口。
+    ///
+    /// 每次都实时扫描一遍，再把缓存里「仍然有效、但这次没扫到」的句柄补上。
+    /// 以前只在缓存为空时才扫描，一旦某个句柄失效（例如登录器进游戏后把窗口重建了），
+    /// 过滤后列表还剩 4 个、不为空，于是再也不会重新扫描——表现就是「永远少一个」。
+    /// </summary>
     private List<IntPtr> RefreshWindows()
     {
-        _gameWindows = _gameWindows.Where(NativeMethods.IsWindow).ToList();
-        if (_gameWindows.Count == 0)
+        string keyword = string.IsNullOrWhiteSpace(TxtWinTitle.Text) ? "梦幻西游" : TxtWinTitle.Text.Trim();
+
+        List<IntPtr> windows = _windows.Snapshot(keyword, includeGameProcesses: true);
+
+        // 缓存里还活着、但这次枚举没出现的，补回来（可能是刚启动、枚举时还没就绪）
+        foreach (IntPtr hwnd in _gameWindows)
         {
-            string keyword = string.IsNullOrWhiteSpace(TxtWinTitle.Text) ? "梦幻西游" : TxtWinTitle.Text.Trim();
-            _gameWindows = _windows.Snapshot(keyword);
+            if (NativeMethods.IsWindow(hwnd) && !windows.Contains(hwnd))
+            {
+                windows.Add(hwnd);
+            }
         }
 
+        _gameWindows = windows;
         return _gameWindows;
+    }
+
+    /// <summary>找窗口时数量对不上，就在日志里把识别到的列出来，避免只看「找到 N 个」无从下手。</summary>
+    private void WarnIfWindowCountOff(IReadOnlyList<IntPtr> windows)
+    {
+        int expected = _config.LastCount;
+        if (expected <= 0 || windows.Count >= expected)
+        {
+            return;
+        }
+
+        string keyword = string.IsNullOrWhiteSpace(TxtWinTitle.Text) ? "梦幻西游" : TxtWinTitle.Text.Trim();
+        _log.Add($"提示：只找到 {windows.Count} 个窗口（配置是 {expected} 个），已识别到这些：");
+        foreach (IntPtr hwnd in windows)
+        {
+            _log.Add($"  · {WindowService.GetTitle(hwnd)}");
+        }
+
+        _log.Add($"少掉的那个，多半是标题里不含关键词「{keyword}」，或者标题还是空的（还在加载）。");
     }
 
     private void OnSaveConfigClick(object sender, RoutedEventArgs e)
@@ -854,6 +1076,14 @@ public partial class MainWindow : Window
         TxtLog.ScrollToEnd();
     }
 
+    /// <summary>折叠 / 展开日志，把空间让给上面的配置区（日志平时不用一直盯着）。</summary>
+    private void OnToggleLogClick(object sender, RoutedEventArgs e)
+    {
+        bool collapse = TxtLog.Visibility == Visibility.Visible;
+        TxtLog.Visibility = collapse ? Visibility.Collapsed : Visibility.Visible;
+        BtnToggleLog.Content = collapse ? "展开" : "收起";
+    }
+
     private void OnClearLogClick(object sender, RoutedEventArgs e)
     {
         TxtLog.Clear();
@@ -890,6 +1120,20 @@ public partial class MainWindow : Window
 
     private void OnResModeChanged(object sender, SelectionChangedEventArgs e) => UpdateResControls();
 
+    /// <summary>手动把游戏设置里的当前比例读回界面，用于在启动器里改完之后同步一下。</summary>
+    private void OnReadRatioClick(object sender, RoutedEventArgs e)
+    {
+        string gamePath = TxtGamePath.Text.Trim().Trim('"');
+        if (gamePath.Length == 0 || !File.Exists(gamePath))
+        {
+            MessageBox.Show("请先填写正确的游戏路径（必须包含 .exe 文件名，且文件真实存在）。",
+                "路径无效", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        SyncRatioFromGame(silent: false);
+    }
+
     private void UpdateResControls()
     {
         if (TxtWinWidth is null || CmbResPreset is null)
@@ -897,10 +1141,15 @@ public partial class MainWindow : Window
             return;
         }
 
-        bool preset = (CmbResMode.SelectedItem as string) == "使用预设";
+        string mode = CmbResMode.SelectedItem as string ?? AppConfig.ModeOptions[0];
+        bool preset = mode == "使用预设";
+        bool autoFit = mode == "自动适配（按比例）";
+        bool keepSize = mode == "不改变窗口大小";
+        bool manual = !preset && !autoFit && !keepSize;
+
         CmbResPreset.IsEnabled = preset;
-        TxtWinWidth.IsEnabled = !preset;
-        TxtWinHeight.IsEnabled = !preset;
+        TxtWinWidth.IsEnabled = manual;
+        TxtWinHeight.IsEnabled = manual;
     }
 
     private void RestoreFromTray()
@@ -908,6 +1157,86 @@ public partial class MainWindow : Window
         Show();
         WindowState = WindowState.Normal;
         Activate();
+    }
+
+    // ================= 自绘标题栏 =================
+
+    private void OnMinimizeClick(object sender, RoutedEventArgs e) => WindowState = WindowState.Minimized;
+
+    private void OnMaximizeClick(object sender, RoutedEventArgs e) =>
+        WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+
+    private void OnCloseWindowClick(object sender, RoutedEventArgs e) => Close();
+
+    /// <summary>最大化 / 还原时切换标题栏图标，避免「已经最大化了还画着最大化按钮」。</summary>
+    private void OnWindowStateChanged(object? sender, EventArgs e)
+    {
+        bool maximized = WindowState == WindowState.Maximized;
+
+        if (IcoMaximize is not null)
+        {
+            IcoMaximize.Data = System.Windows.Media.Geometry.Parse(maximized
+                ? "M 0,2 H 8 V 10 H 0 Z M 2,0 H 10 V 8"
+                : "M 0,0 H 10 V 10 H 0 Z");
+        }
+
+        if (BtnMaximize is not null)
+        {
+            BtnMaximize.ToolTip = maximized ? "还原" : "最大化";
+        }
+    }
+
+    /// <summary>
+    /// 无边框窗口要自己管最大化尺寸。系统默认按「整块屏幕」算，会盖住任务栏；
+    /// 改成「显示器工作区」之后，最大化就和普通窗口一样贴住任务栏上沿。
+    /// </summary>
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+
+        IntPtr handle = new WindowInteropHelper(this).Handle;
+        HwndSource.FromHwnd(handle)?.AddHook(WndProc);
+    }
+
+    private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg == NativeMethods.WM_GETMINMAXINFO)
+        {
+            ApplyMaximizedBounds(hwnd, lParam);
+            handled = true;
+        }
+
+        return IntPtr.Zero;
+    }
+
+    private static void ApplyMaximizedBounds(IntPtr hwnd, IntPtr lParam)
+    {
+        IntPtr monitor = NativeMethods.MonitorFromWindow(hwnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
+        if (monitor == IntPtr.Zero)
+        {
+            return;
+        }
+
+        var monitorInfo = new NativeMethods.MONITORINFO
+        {
+            cbSize = Marshal.SizeOf<NativeMethods.MONITORINFO>()
+        };
+
+        if (!NativeMethods.GetMonitorInfo(monitor, ref monitorInfo))
+        {
+            return;
+        }
+
+        var info = Marshal.PtrToStructure<NativeMethods.MINMAXINFO>(lParam);
+        NativeMethods.RECT work = monitorInfo.rcWork;
+        NativeMethods.RECT screen = monitorInfo.rcMonitor;
+
+        info.ptMaxPosition.X = work.Left - screen.Left;
+        info.ptMaxPosition.Y = work.Top - screen.Top;
+        info.ptMaxSize.X = work.Right - work.Left;
+        info.ptMaxSize.Y = work.Bottom - work.Top;
+
+        Marshal.StructureToPtr(info, lParam, true);
     }
 
     private void OnClosing(object? sender, System.ComponentModel.CancelEventArgs e)

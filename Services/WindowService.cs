@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Text;
 
 namespace Nightforge.Services;
@@ -9,6 +9,15 @@ public sealed class WindowService
     private readonly LogService _log;
 
     public WindowService(LogService log) => _log = log;
+
+    /// <summary>窗口边框占位：客户区相对窗口左上角的偏移，以及左右 / 上下边框合计。</summary>
+    public readonly record struct WindowFrame(int OffsetX, int OffsetY, int ExtraWidth, int ExtraHeight)
+    {
+        public static readonly WindowFrame None = new(0, 0, 0, 0);
+    }
+
+    /// <summary>主显示器工作区（物理像素，已排除任务栏）。</summary>
+    public readonly record struct WorkArea(int Left, int Top, int Width, int Height);
 
     public static string GetTitle(IntPtr hwnd)
     {
@@ -23,11 +32,16 @@ public sealed class WindowService
         return sb.ToString();
     }
 
-    /// <summary>枚举当前所有「可见 + 标题含关键词 + 非本程序」的窗口。</summary>
-    public List<IntPtr> Snapshot(string keyword)
+    /// <summary>
+    /// 枚举游戏窗口。
+    ///
+    /// 默认只按标题关键词匹配；includeGameProcesses 打开后会额外按「游戏进程名 + 是主窗口」兜底，
+    /// 这样某个窗口标题变了（或暂时为空）也不会被整个漏掉。
+    /// </summary>
+    public List<IntPtr> Snapshot(string keyword, bool includeGameProcesses = false)
     {
         var result = new List<IntPtr>();
-        if (string.IsNullOrWhiteSpace(keyword))
+        if (string.IsNullOrWhiteSpace(keyword) && !includeGameProcesses)
         {
             return result;
         }
@@ -53,7 +67,14 @@ public sealed class WindowService
                 return true;
             }
 
-            if (title.Contains(keyword, StringComparison.OrdinalIgnoreCase))
+            if (!string.IsNullOrWhiteSpace(keyword)
+                && title.Contains(keyword, StringComparison.OrdinalIgnoreCase))
+            {
+                result.Add(hwnd);
+                return true;
+            }
+
+            if (includeGameProcesses && IsGameMainWindow(hwnd, pid))
             {
                 result.Add(hwnd);
             }
@@ -62,6 +83,52 @@ public sealed class WindowService
         }, IntPtr.Zero);
 
         return result;
+    }
+
+    /// <summary>游戏客户端进程名（登录器与游戏本体）。</summary>
+    private static readonly string[] GameProcessNames =
+    [
+        "MyLauncher_x64r", "MyPCLauncher_x64r", "MyGame_x64r"
+    ];
+
+    /// <summary>
+    /// 判断是不是游戏主窗口：进程名对得上、没有 owner（有 owner 的通常是提示条/进度条这类附属小窗）、尺寸像正常窗口。
+    /// </summary>
+    private static bool IsGameMainWindow(IntPtr hwnd, uint pid)
+    {
+        string name;
+        try
+        {
+            using Process process = Process.GetProcessById((int)pid);
+            name = process.ProcessName;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+
+        if (!GameProcessNames.Any(n => n.Equals(name, StringComparison.OrdinalIgnoreCase)))
+        {
+            return false;
+        }
+
+        if (NativeMethods.GetWindow(hwnd, NativeMethods.GW_OWNER) != IntPtr.Zero)
+        {
+            return false;
+        }
+
+        if (!NativeMethods.GetWindowRect(hwnd, out NativeMethods.RECT rc))
+        {
+            return false;
+        }
+
+        int w = rc.Right - rc.Left;
+        int h = rc.Bottom - rc.Top;
+        return w >= 320 && h >= 240;
     }
 
     /// <summary>依次启动游戏并捕获新出现的窗口句柄。</summary>
@@ -74,7 +141,7 @@ public sealed class WindowService
         CancellationToken token)
     {
         var captured = new List<IntPtr>();
-        var known = Snapshot(keyword);
+        var known = Snapshot(keyword, includeGameProcesses: true);
 
         for (int i = 1; i <= count; i++)
         {
@@ -97,7 +164,7 @@ public sealed class WindowService
             {
                 await Task.Delay(200, token).ConfigureAwait(true);
 
-                foreach (IntPtr hwnd in Snapshot(keyword))
+                foreach (IntPtr hwnd in Snapshot(keyword, includeGameProcesses: true))
                 {
                     if (!known.Contains(hwnd))
                     {
@@ -134,7 +201,7 @@ public sealed class WindowService
             }
         }
 
-        foreach (IntPtr hwnd in Snapshot(keyword))
+        foreach (IntPtr hwnd in Snapshot(keyword, includeGameProcesses: true))
         {
             if (!captured.Contains(hwnd))
             {
@@ -147,6 +214,13 @@ public sealed class WindowService
     }
 
     /// <summary>主显示器工作区（物理像素）。</summary>
+    public WorkArea GetWorkArea()
+    {
+        NativeMethods.RECT work = GetPrimaryWorkArea();
+        return new WorkArea(work.Left, work.Top, work.Right - work.Left, work.Bottom - work.Top);
+    }
+
+    /// <summary>主显示器工作区原始结构（物理像素）。</summary>
     internal NativeMethods.RECT GetPrimaryWorkArea()
     {
         var pt = new NativeMethods.POINT { X = 0, Y = 0 };
@@ -161,101 +235,91 @@ public sealed class WindowService
         return new NativeMethods.RECT { Left = 0, Top = 0, Right = 1920, Bottom = 1080 };
     }
 
-    /// <summary>五个窗口固定布局：左上 / 上中 / 右上 / 左下 / 右下。</summary>
-    public void ArrangeFive(IReadOnlyList<IntPtr> windows, int width, int height, bool resize)
+    /// <summary>
+    /// 量出窗口边框的占位。排列的目标是「客户区」正好落在槽位上，
+    /// 所以真正传给 SetWindowPos 的位置和尺寸都要把这段边框补偿掉，
+    /// 否则带标题栏的窗口会整体偏右下、内容区也比预期小一截。
+    /// </summary>
+    public WindowFrame MeasureFrame(IntPtr hwnd)
     {
-        if (windows.Count == 0)
+        if (!NativeMethods.GetWindowRect(hwnd, out NativeMethods.RECT windowRect)
+            || !NativeMethods.GetClientRect(hwnd, out NativeMethods.RECT clientRect))
         {
-            return;
+            return WindowFrame.None;
         }
 
-        NativeMethods.RECT wa = GetPrimaryWorkArea();
-        int screenW = wa.Right - wa.Left;
-        int screenH = wa.Bottom - wa.Top;
-
-        (int X, int Y)[] slots =
-        [
-            (wa.Left, wa.Top),
-            (wa.Left + (screenW - width) / 2, wa.Top),
-            (wa.Right - width, wa.Top),
-            (wa.Left, wa.Bottom - height),
-            (wa.Right - width, wa.Bottom - height)
-        ];
-
-        for (int i = 0; i < windows.Count && i < slots.Length; i++)
+        var origin = new NativeMethods.POINT { X = 0, Y = 0 };
+        if (!NativeMethods.ClientToScreen(hwnd, ref origin))
         {
-            MoveWindow(windows[i], slots[i].X, slots[i].Y, width, height, resize);
+            return WindowFrame.None;
         }
+
+        int extraW = (windowRect.Right - windowRect.Left) - clientRect.Right;
+        int extraH = (windowRect.Bottom - windowRect.Top) - clientRect.Bottom;
+
+        // 最小化或动画中的窗口矩形是负坐标、数值很怪，这种读数不可信，按「没有边框」处理
+        if (extraW is < 0 or > 160 || extraH is < 0 or > 160)
+        {
+            return WindowFrame.None;
+        }
+
+        return new WindowFrame(origin.X - windowRect.Left, origin.Y - windowRect.Top, extraW, extraH);
     }
 
-    /// <summary>其余数量按网格自动排布。</summary>
-    public void ArrangeGrid(IReadOnlyList<IntPtr> windows, int width, int height, bool resize)
+    /// <summary>按排列方案摆放窗口，返回成功摆好的数量。</summary>
+    public int ApplyLayout(IReadOnlyList<IntPtr> windows, LayoutPlan plan, bool resize)
     {
-        if (windows.Count == 0)
+        if (plan.IsEmpty || windows.Count == 0)
         {
-            return;
+            return 0;
         }
 
-        NativeMethods.RECT wa = GetPrimaryWorkArea();
-        int screenW = wa.Right - wa.Left;
-        int screenH = wa.Bottom - wa.Top;
-
-        int maxCols = Math.Max(1, screenW / Math.Max(1, width));
-        int cols = Math.Min(maxCols, windows.Count);
-        int rows = (int)Math.Ceiling(windows.Count / (double)cols);
-
-        while (rows > 1 && cols < windows.Count && (long)rows * height > screenH)
+        int ok = 0;
+        int total = Math.Min(windows.Count, plan.Slots.Count);
+        for (int i = 0; i < total; i++)
         {
-            cols++;
-            rows = (int)Math.Ceiling(windows.Count / (double)cols);
-        }
-
-        for (int i = 0; i < windows.Count; i++)
-        {
-            int row = i / cols;
-            int col = i % cols;
-            int x = wa.Left + col * width;
-            int y = wa.Top + row * height;
-
-            if (y + height > wa.Bottom)
+            IntPtr hwnd = windows[i];
+            if (!NativeMethods.IsWindow(hwnd))
             {
-                y = Math.Max(wa.Top, wa.Bottom - height);
+                continue;
             }
 
-            if (x + width > wa.Right)
+            if (ApplySlot(hwnd, plan.Slots[i], resize))
             {
-                x = Math.Max(wa.Left, wa.Right - width);
+                ok++;
             }
-
-            MoveWindow(windows[i], x, y, width, height, resize);
         }
+
+        return ok;
     }
 
-    public bool MoveWindow(IntPtr hwnd, int x, int y, int width, int height, bool resize)
+    private bool ApplySlot(IntPtr hwnd, WindowSlot slot, bool resize)
     {
-        if (!NativeMethods.IsWindow(hwnd))
-        {
-            return false;
-        }
-
         if (NativeMethods.IsIconic(hwnd))
         {
             NativeMethods.ShowWindow(hwnd, NativeMethods.SW_RESTORE);
             Thread.Sleep(30);
         }
 
+        WindowFrame frame = MeasureFrame(hwnd);
+        int x = slot.X - frame.OffsetX;
+        int y = slot.Y - frame.OffsetY;
+        int w = slot.Width + frame.ExtraWidth;
+        int h = slot.Height + frame.ExtraHeight;
+
         if (!resize)
         {
-            if (NativeMethods.GetWindowRect(hwnd, out NativeMethods.RECT rc))
+            // 不改尺寸时保留窗口当前大小，只把它挪到槽位对应的客户区原点
+            if (NativeMethods.GetWindowRect(hwnd, out NativeMethods.RECT current))
             {
-                width = rc.Right - rc.Left;
-                height = rc.Bottom - rc.Top;
+                w = current.Right - current.Left;
+                h = current.Bottom - current.Top;
             }
         }
 
         uint flags = NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW;
-        bool ok = NativeMethods.SetWindowPos(hwnd, IntPtr.Zero, x, y, width, height, flags);
-        Thread.Sleep(50);
+        bool ok = NativeMethods.SetWindowPos(hwnd, IntPtr.Zero, x, y, w, h, flags);
+        Thread.Sleep(30);
         return ok;
     }
 
@@ -307,6 +371,7 @@ public sealed class WindowService
         return ok;
     }
 
+    /// <summary>窗口外框尺寸。</summary>
     public (int Width, int Height) GetWindowSize(IntPtr hwnd)
     {
         if (NativeMethods.IsWindow(hwnd) && NativeMethods.GetWindowRect(hwnd, out NativeMethods.RECT rc))
@@ -316,6 +381,20 @@ public sealed class WindowService
             if (w > 0 && h > 0)
             {
                 return (w, h);
+            }
+        }
+
+        return (0, 0);
+    }
+
+    /// <summary>窗口客户区尺寸（不含标题栏与边框）。</summary>
+    public (int Width, int Height) GetClientSize(IntPtr hwnd)
+    {
+        if (NativeMethods.IsWindow(hwnd) && NativeMethods.GetClientRect(hwnd, out NativeMethods.RECT cr))
+        {
+            if (cr.Right > 0 && cr.Bottom > 0)
+            {
+                return (cr.Right, cr.Bottom);
             }
         }
 

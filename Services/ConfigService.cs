@@ -40,6 +40,8 @@ public static class ConfigService
         cfg.WaitSec = GetInt(SettingsSection, "WaitSec", cfg.WaitSec, path);
         cfg.ResMode = GetString(SettingsSection, "ResMode", cfg.ResMode, path);
         cfg.ResPreset = GetString(SettingsSection, "ResPreset", cfg.ResPreset, path);
+        cfg.WindowGap = GetInt(SettingsSection, "WindowGap", cfg.WindowGap, path);
+        cfg.AspectRatio = GetString(SettingsSection, "AspectRatio", cfg.AspectRatio, path);
         cfg.CheckUpdateOnStart = GetInt(SettingsSection, "CheckUpdateOnStart", cfg.CheckUpdateOnStart ? 1 : 0, path) != 0;
         cfg.SkipVersion = GetString(SettingsSection, "SkipVersion", cfg.SkipVersion, path);
         cfg.LastRunVersion = GetString(SettingsSection, "LastRunVersion", cfg.LastRunVersion, path);
@@ -57,6 +59,9 @@ public static class ConfigService
         if (cfg.WinHeight < 200) cfg.WinHeight = 600;
         if (cfg.WaitSec < 1) cfg.WaitSec = 7;
         if (cfg.WaitSec > 120) cfg.WaitSec = 120;
+        if (cfg.WindowGap < 0) cfg.WindowGap = 0;
+        if (cfg.WindowGap > LayoutCalculator.MaxGap) cfg.WindowGap = LayoutCalculator.MaxGap;
+        if (AspectRatioOption.FromKey(cfg.AspectRatio) is null) cfg.AspectRatio = AspectRatioOption.Default.Key;
 
         return cfg;
     }
@@ -74,6 +79,8 @@ public static class ConfigService
         WriteString(SettingsSection, "WaitSec", cfg.WaitSec.ToString(CultureInfo.InvariantCulture), path);
         WriteString(SettingsSection, "ResMode", cfg.ResMode, path);
         WriteString(SettingsSection, "ResPreset", cfg.ResPreset, path);
+        WriteString(SettingsSection, "WindowGap", cfg.WindowGap.ToString(CultureInfo.InvariantCulture), path);
+        WriteString(SettingsSection, "AspectRatio", cfg.AspectRatio, path);
         WriteString(SettingsSection, "CheckUpdateOnStart", cfg.CheckUpdateOnStart ? "1" : "0", path);
         WriteString(SettingsSection, "SkipVersion", cfg.SkipVersion, path);
         WriteString(SettingsSection, "LastRunVersion", cfg.LastRunVersion, path);

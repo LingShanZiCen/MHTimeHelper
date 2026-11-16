@@ -1,220 +1,347 @@
 ﻿<Window x:Class="Nightforge.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         Title="幻夜工坊"
         Icon="pack://application:,,,/app.ico"
-        Height="840" Width="800"
-        MinHeight="660" MinWidth="720"
-        WindowStartupLocation="CenterScreen">
+        Height="940" Width="880"
+        MinHeight="700" MinWidth="780"
+        WindowStartupLocation="CenterScreen"
+        WindowStyle="None"
+        Background="{StaticResource WindowBg}"
+        FontFamily="Microsoft YaHei UI, Segoe UI"
+        UseLayoutRounding="True"
+        SnapsToDevicePixels="True">
 
-    <Grid Margin="18">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="*" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-        </Grid.RowDefinitions>
+    <!-- 无边框窗口 + WindowChrome：系统仍然负责边缘缩放、Aero Snap，
+         顶部 48px 交给系统当标题栏处理（拖拽、双击最大化都免费拿到），
+         标题栏里的按钮再单独声明可点击。 -->
+    <shell:WindowChrome.WindowChrome>
+        <shell:WindowChrome CaptionHeight="48" ResizeBorderThickness="6"
+                            GlassFrameThickness="0" CornerRadius="0"
+                            UseAeroCaptionButtons="False" />
+    </shell:WindowChrome.WindowChrome>
 
-        <!-- 标题区 -->
-        <StackPanel Grid.Row="0" Margin="0,0,0,14">
-            <TextBlock Text="幻夜工坊" Style="{StaticResource AppTitle}" />
-            <TextBlock x:Name="TxtSubtitle" Style="{StaticResource Hint}" Margin="0,4,0,0"
-                       Text="一键多开 · 窗口自动排列 · 全局热键" />
+    <Border Background="{StaticResource WindowBackdrop}"
+            BorderBrush="#252C3A" BorderThickness="1">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="48" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
 
-            <Border x:Name="AdminBanner" Visibility="Collapsed" Margin="0,10,0,0"
-                    Background="#3A2C12" CornerRadius="6" Padding="12,8">
-                <DockPanel>
-                    <Button x:Name="BtnRestartAdmin" DockPanel.Dock="Right" Content="以管理员重启"
-                            Height="28" MinWidth="118" Click="OnRestartAdminClick" />
-                    <TextBlock Foreground="#E8C07A" VerticalAlignment="Center" TextWrapping="Wrap"
-                               Text="当前不是管理员权限，移动游戏窗口可能失败。" />
-                </DockPanel>
-            </Border>
-        </StackPanel>
+            <!-- ================= 自绘标题栏 ================= -->
+            <Grid Grid.Row="0" Background="{StaticResource TitleBarBg}">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
 
-        <!-- 配置区 -->
-        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
-            <StackPanel>
+                <StackPanel Grid.Column="0" Orientation="Horizontal" Margin="16,0,0,0" VerticalAlignment="Center">
+                    <Image Width="28" Height="28" VerticalAlignment="Center"
+                           Source="pack://application:,,,/app-icon.png"
+                           RenderOptions.BitmapScalingMode="HighQuality" />
+                    <TextBlock Text="幻夜工坊" Style="{StaticResource AppTitle}" Margin="9,0,0,0" />
+                    <Border Background="#1B2130" CornerRadius="5" Padding="7,2" Margin="9,0,0,0"
+                            VerticalAlignment="Center" BorderBrush="#2A3346" BorderThickness="1">
+                        <TextBlock x:Name="TxtVersion" Foreground="{StaticResource TextMuted}"
+                                   FontSize="10.5" Text="v1.0.2" />
+                    </Border>
+                </StackPanel>
 
-                <!-- 游戏设置 -->
-                <Border Style="{StaticResource Card}">
-                    <StackPanel>
-                        <TextBlock Text="游戏设置" Style="{StaticResource SectionTitle}" />
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="118" />
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <Grid.RowDefinitions>
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="Auto" />
-                            </Grid.RowDefinitions>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="0,0,6,0"
+                            VerticalAlignment="Center"
+                            shell:WindowChrome.IsHitTestVisibleInChrome="True">
+                    <Button x:Name="BtnMinimize" Style="{StaticResource CaptionButton}"
+                            Click="OnMinimizeClick" ToolTip="最小化">
+                        <Path Data="M 0,0 H 11" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                              StrokeThickness="1.2" />
+                    </Button>
+                    <Button x:Name="BtnMaximize" Style="{StaticResource CaptionButton}"
+                            Click="OnMaximizeClick" ToolTip="最大化">
+                        <Path x:Name="IcoMaximize" Data="M 0,0 H 10 V 10 H 0 Z"
+                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                              StrokeThickness="1.2" />
+                    </Button>
+                    <Button Style="{StaticResource CaptionCloseButton}"
+                            Click="OnCloseWindowClick" ToolTip="关闭">
+                        <Path Data="M 0,0 L 10,10 M 10,0 L 0,10"
+                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                              StrokeThickness="1.2" />
+                    </Button>
+                </StackPanel>
+            </Grid>
 
-                            <TextBlock Grid.Row="0" Grid.Column="0" Text="游戏路径" Style="{StaticResource FieldLabel}" Margin="0,0,0,10" />
-                            <TextBox Grid.Row="0" Grid.Column="1" x:Name="TxtGamePath" Height="32" Margin="0,0,8,10"
-                                     VerticalContentAlignment="Center" />
-                            <Button Grid.Row="0" Grid.Column="2" Content="浏览" Width="66" Height="32" Margin="0,0,0,10"
-                                    Click="OnBrowseGameClick" />
+            <!-- ================= 内容区 ================= -->
+            <Grid Grid.Row="1" Margin="18,14,18,16" MaxWidth="1180">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
 
-                            <TextBlock Grid.Row="1" Grid.Column="0" Text="窗口标题关键词" Style="{StaticResource FieldLabel}" Margin="0,0,0,10" />
-                            <TextBox Grid.Row="1" Grid.Column="1" x:Name="TxtWinTitle" Height="32" Margin="0,0,8,10"
-                                     VerticalContentAlignment="Center" />
-                            <TextBlock Grid.Row="1" Grid.Column="2" Text="例：梦幻西游" Style="{StaticResource Hint}"
-                                       VerticalAlignment="Center" Margin="0,0,0,10" />
-
-                            <TextBlock Grid.Row="2" Grid.Column="0" Text="启动数量" Style="{StaticResource FieldLabel}" Margin="0,0,0,10" />
-                            <ComboBox Grid.Row="2" Grid.Column="1" x:Name="CmbCount" Height="32" Width="120"
-                                      HorizontalAlignment="Left" Margin="0,0,8,10" />
-
-                            <TextBlock Grid.Row="3" Grid.Column="0" Text="启动后等待（秒）" Style="{StaticResource FieldLabel}" Margin="0,0,0,10" />
-                            <TextBox Grid.Row="3" Grid.Column="1" x:Name="TxtWaitSec" Height="32" Width="120"
-                                     HorizontalAlignment="Left" Margin="0,0,8,10" VerticalContentAlignment="Center" />
-                            <TextBlock Grid.Row="3" Grid.Column="2" Text="电脑越慢数值越大" Style="{StaticResource Hint}"
-                                       VerticalAlignment="Center" Margin="0,0,0,10" />
-
-                            <TextBlock Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" Style="{StaticResource Hint}"
-                                       Text="游戏路径必须包含 .exe 文件名，且文件真实存在。" />
-                        </Grid>
-                    </StackPanel>
+                <!-- 管理员提示 -->
+                <Border x:Name="AdminBanner" Grid.Row="0" Visibility="Collapsed" Margin="0,0,0,12"
+                        Background="#2A2113" BorderBrush="#4A3A18" BorderThickness="1"
+                        CornerRadius="9" Padding="14,9">
+                    <DockPanel>
+                        <Button x:Name="BtnRestartAdmin" DockPanel.Dock="Right" Content="以管理员重启"
+                                Style="{StaticResource SmallButton}" MinWidth="112" Height="28" Click="OnRestartAdminClick" />
+                        <TextBlock Foreground="#E0B96A" VerticalAlignment="Center" TextWrapping="Wrap" FontSize="12"
+                                   Text="当前不是管理员权限，移动游戏窗口可能失败。" />
+                    </DockPanel>
                 </Border>
 
-                <!-- 窗口布局 -->
-                <Border Style="{StaticResource Card}">
+                <!-- 配置区 -->
+                <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Padding="0,0,6,0">
                     <StackPanel>
-                        <TextBlock Text="窗口布局" Style="{StaticResource SectionTitle}" />
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="118" />
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <Grid.RowDefinitions>
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="Auto" />
-                            </Grid.RowDefinitions>
 
-                            <TextBlock Grid.Row="0" Grid.Column="0" Text="分辨率模式" Style="{StaticResource FieldLabel}" Margin="0,0,0,10" />
-                            <ComboBox Grid.Row="0" Grid.Column="1" x:Name="CmbResMode" Height="32" Width="170"
-                                      HorizontalAlignment="Left" Margin="0,0,8,10"
-                                      SelectionChanged="OnResModeChanged" />
+                        <!-- 游戏设置 -->
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,14">
+                                    <Border Width="3" Height="13" CornerRadius="2"
+                                            Background="{StaticResource AccentGradient}" VerticalAlignment="Center" />
+                                    <TextBlock Text="游戏设置" Style="{StaticResource SectionTitle}" Margin="9,0,0,0" />
+                                </StackPanel>
 
-                            <TextBlock Grid.Row="1" Grid.Column="0" Text="窗口宽 × 高" Style="{StaticResource FieldLabel}" Margin="0,0,0,10" />
-                            <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,8,10">
-                                <TextBox x:Name="TxtWinWidth" Height="32" Width="86" VerticalContentAlignment="Center" />
-                                <TextBlock Text="×" Margin="10,0" VerticalAlignment="Center" />
-                                <TextBox x:Name="TxtWinHeight" Height="32" Width="86" VerticalContentAlignment="Center" />
-                                <ComboBox x:Name="CmbResPreset" Height="32" Width="140" Margin="14,0,0,0" />
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="104" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+
+                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="游戏路径" Style="{StaticResource FieldLabel}" Margin="0,0,0,11" />
+                                    <TextBox Grid.Row="0" Grid.Column="1" x:Name="TxtGamePath" Style="{StaticResource InputBox}"
+                                             Margin="0,0,8,11" />
+                                    <Button Grid.Row="0" Grid.Column="2" Content="浏览" Style="{StaticResource SmallButton}"
+                                            Margin="0,0,0,11" Click="OnBrowseGameClick" />
+
+                                    <TextBlock Grid.Row="1" Grid.Column="0" Text="窗口标题关键词" Style="{StaticResource FieldLabel}" Margin="0,0,0,11" />
+                                    <TextBox Grid.Row="1" Grid.Column="1" x:Name="TxtWinTitle" Style="{StaticResource InputBox}"
+                                             Margin="0,0,8,11" />
+                                    <TextBlock Grid.Row="1" Grid.Column="2" Text="例：梦幻西游" Style="{StaticResource Hint}"
+                                               VerticalAlignment="Center" Margin="0,0,0,11" />
+
+                                    <TextBlock Grid.Row="2" Grid.Column="0" Text="启动数量" Style="{StaticResource FieldLabel}" Margin="0,0,0,11" />
+                                    <ComboBox Grid.Row="2" Grid.Column="1" x:Name="CmbCount" Style="{StaticResource Dropdown}"
+                                              Width="120" HorizontalAlignment="Left" Margin="0,0,8,11" />
+
+                                    <TextBlock Grid.Row="3" Grid.Column="0" Text="启动后等待" Style="{StaticResource FieldLabel}" Margin="0,0,0,11" />
+                                    <StackPanel Grid.Row="3" Grid.Column="1" Orientation="Horizontal" Margin="0,0,8,11">
+                                        <TextBox x:Name="TxtWaitSec" Style="{StaticResource InputBox}" Width="76" />
+                                        <TextBlock Text="秒" Style="{StaticResource Hint}" VerticalAlignment="Center" Margin="8,0,0,0" />
+                                        <TextBlock Text="· 电脑越慢数值越大" Style="{StaticResource Hint}"
+                                                   VerticalAlignment="Center" Margin="12,0,0,0" />
+                                    </StackPanel>
+
+                                    <TextBlock Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" Style="{StaticResource Hint}"
+                                               Text="游戏路径必须包含 .exe 文件名，且文件真实存在。" />
+                                </Grid>
                             </StackPanel>
+                        </Border>
 
-                            <TextBlock Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2" Style="{StaticResource Hint}"
-                                       Text="5 个窗口走五点布局（左上 / 上中 / 右上 / 左下 / 右下），其余数量自动网格排布。" />
-                        </Grid>
-                    </StackPanel>
-                </Border>
+                        <!-- 窗口布局 -->
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,14">
+                                    <Border Width="3" Height="13" CornerRadius="2"
+                                            Background="{StaticResource AccentGradient}" VerticalAlignment="Center" />
+                                    <TextBlock Text="窗口布局" Style="{StaticResource SectionTitle}" Margin="9,0,0,0" />
+                                </StackPanel>
 
-                <!-- 同步器 -->
-                <Border Style="{StaticResource Card}">
-                    <StackPanel>
-                        <TextBlock Text="同步器（可选）" Style="{StaticResource SectionTitle}" />
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="118" />
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Grid.Column="0" Text="同步器路径" Style="{StaticResource FieldLabel}" />
-                            <TextBox Grid.Column="1" x:Name="TxtSyncPath" Height="32" Margin="0,0,8,0"
-                                     VerticalContentAlignment="Center" />
-                            <StackPanel Grid.Column="2" Orientation="Horizontal">
-                                <Button Content="浏览" Width="66" Height="32" Margin="0,0,8,0" Click="OnBrowseSyncClick" />
-                                <Button Content="打开同步器" Height="32" MinWidth="100" Click="OnOpenSyncClick" />
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="104" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+
+                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="画面比例" Style="{StaticResource FieldLabel}" Margin="0,0,0,11" />
+                                    <ComboBox Grid.Row="0" Grid.Column="1" x:Name="CmbAspect" Style="{StaticResource Dropdown}"
+                                              Width="196" HorizontalAlignment="Left" Margin="0,0,8,11"
+                                              ToolTip="与游戏启动器里的「画面比例」是同一处设置，仅对之后启动的窗口生效" />
+                                    <Button Grid.Row="0" Grid.Column="2" Content="从游戏读取" Style="{StaticResource SmallButton}"
+                                            MinWidth="94" Margin="0,0,0,11" Click="OnReadRatioClick"
+                                            ToolTip="把游戏设置里当前的比例读回来，用于在启动器里改完之后同步" />
+
+                                    <TextBlock Grid.Row="1" Grid.Column="0" Text="分辨率模式" Style="{StaticResource FieldLabel}" Margin="0,0,0,11" />
+                                    <ComboBox Grid.Row="1" Grid.Column="1" x:Name="CmbResMode" Style="{StaticResource Dropdown}"
+                                              Width="196" HorizontalAlignment="Left" Margin="0,0,8,11"
+                                              SelectionChanged="OnResModeChanged" />
+
+                                    <TextBlock Grid.Row="2" Grid.Column="0" Text="窗口宽 × 高" Style="{StaticResource FieldLabel}" Margin="0,0,0,11" />
+                                    <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,0,8,11">
+                                        <TextBox x:Name="TxtWinWidth" Style="{StaticResource InputBox}" Width="80" />
+                                        <TextBlock Text="×" Foreground="{StaticResource TextMuted}" Margin="9,0"
+                                                   VerticalAlignment="Center" />
+                                        <TextBox x:Name="TxtWinHeight" Style="{StaticResource InputBox}" Width="80" />
+                                        <ComboBox x:Name="CmbResPreset" Style="{StaticResource Dropdown}"
+                                                  Width="132" Margin="12,0,0,0" />
+                                    </StackPanel>
+
+                                    <TextBlock Grid.Row="3" Grid.Column="0" Text="窗口间距" Style="{StaticResource FieldLabel}" Margin="0,0,0,11" />
+                                    <StackPanel Grid.Row="3" Grid.Column="1" Orientation="Horizontal" Margin="0,0,8,11">
+                                        <TextBox x:Name="TxtWinGap" Style="{StaticResource InputBox}" Width="80" />
+                                        <TextBlock Text="像素 · 0 表示紧贴，最大 60" Style="{StaticResource Hint}"
+                                                   VerticalAlignment="Center" Margin="9,0,0,0" />
+                                    </StackPanel>
+
+                                    <TextBlock Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" Style="{StaticResource Hint}"
+                                               Text="「自动适配」会按启动数量与画面比例算出互不重叠、且客户区正好等于该比例的窗口尺寸；5 个窗口仍走五点布局（左上 / 上中 / 右上 / 左下 / 右下）。" />
+                                </Grid>
                             </StackPanel>
-                        </Grid>
-                        <TextBlock Style="{StaticResource Hint}" Margin="0,10,0,0"
-                                   Text="本程序不包含同步器，请自行准备，并可在此填写其完整路径以便一键启动。" />
-                    </StackPanel>
-                </Border>
+                        </Border>
 
-                <!-- 热键 -->
-                <Border Style="{StaticResource Card}">
+                        <!-- 同步器 -->
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,14">
+                                    <Border Width="3" Height="13" CornerRadius="2"
+                                            Background="{StaticResource AccentGradient}" VerticalAlignment="Center" />
+                                    <TextBlock Text="同步器" Style="{StaticResource SectionTitle}" Margin="9,0,0,0" />
+                                    <Border Background="#1B2130" CornerRadius="5" Padding="6,1" Margin="8,0,0,0"
+                                            VerticalAlignment="Center">
+                                        <TextBlock Text="可选" Foreground="{StaticResource TextMuted}" FontSize="10" />
+                                    </Border>
+                                </StackPanel>
+
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="104" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="同步器路径" Style="{StaticResource FieldLabel}" />
+                                    <TextBox Grid.Column="1" x:Name="TxtSyncPath" Style="{StaticResource InputBox}"
+                                             Margin="0,0,8,0" />
+                                    <StackPanel Grid.Column="2" Orientation="Horizontal">
+                                        <Button Content="浏览" Style="{StaticResource SmallButton}" Margin="0,0,6,0"
+                                                Click="OnBrowseSyncClick" />
+                                        <Button Content="打开" Style="{StaticResource SmallButton}" MinWidth="60"
+                                                Click="OnOpenSyncClick" />
+                                    </StackPanel>
+                                </Grid>
+                                <TextBlock Style="{StaticResource Hint}" Margin="0,10,0,0"
+                                           Text="本程序不包含同步器，请自行准备，并可在此填写其完整路径以便一键启动。" />
+                            </StackPanel>
+                        </Border>
+
+                        <!-- 热键 -->
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,14">
+                                    <Border Width="3" Height="13" CornerRadius="2"
+                                            Background="{StaticResource AccentGradient}" VerticalAlignment="Center" />
+                                    <TextBlock Text="全局热键" Style="{StaticResource SectionTitle}" Margin="9,0,0,0" />
+                                </StackPanel>
+
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="104" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+
+                                    <TextBlock Grid.Row="0" Grid.Column="0" Text="前置全部窗口" Style="{StaticResource FieldLabel}" Margin="0,0,0,11" />
+                                    <TextBox Grid.Row="0" Grid.Column="1" x:Name="TxtHotkeyFront" Style="{StaticResource InputBox}"
+                                             Margin="0,0,8,11"
+                                             ToolTip="可直接输入，如 Ctrl+Alt+T；也可点右侧「设置」按钮按键录制" />
+                                    <Button Grid.Row="0" Grid.Column="2" Content="设置" Style="{StaticResource SmallButton}"
+                                            Margin="0,0,0,11" Tag="Front" Click="OnSetHotkeyClick" />
+
+                                    <TextBlock Grid.Row="1" Grid.Column="0" Text="老板键" Style="{StaticResource FieldLabel}" Margin="0,0,0,11" />
+                                    <TextBox Grid.Row="1" Grid.Column="1" x:Name="TxtHotkeyMinimize" Style="{StaticResource InputBox}"
+                                             Margin="0,0,8,11"
+                                             ToolTip="可直接输入，如 Ctrl+Alt+B；也可点右侧「设置」按钮按键录制" />
+                                    <Button Grid.Row="1" Grid.Column="2" Content="设置" Style="{StaticResource SmallButton}"
+                                            Margin="0,0,0,11" Tag="Minimize" Click="OnSetHotkeyClick" />
+
+                                    <TextBlock Grid.Row="2" Grid.Column="0" Text="获取窗口大小" Style="{StaticResource FieldLabel}" Margin="0,0,0,11" />
+                                    <TextBox Grid.Row="2" Grid.Column="1" x:Name="TxtHotkeyGetSize" Style="{StaticResource InputBox}"
+                                             Margin="0,0,8,11"
+                                             ToolTip="可直接输入，如 Ctrl+Alt+S；也可点右侧「设置」按钮按键录制" />
+                                    <Button Grid.Row="2" Grid.Column="2" Content="设置" Style="{StaticResource SmallButton}"
+                                            Margin="0,0,0,11" Tag="GetSize" Click="OnSetHotkeyClick" />
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+
+                    </StackPanel>
+                </ScrollViewer>
+
+                <!-- 运行日志 -->
+                <Border Grid.Row="2" Style="{StaticResource Card}" Margin="0,0,0,12" Padding="14,12">
                     <StackPanel>
-                        <TextBlock Text="全局热键" Style="{StaticResource SectionTitle}" />
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="118" />
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <Grid.RowDefinitions>
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="Auto" />
-                            </Grid.RowDefinitions>
-
-                            <TextBlock Grid.Row="0" Grid.Column="0" Text="前置全部窗口" Style="{StaticResource FieldLabel}" Margin="0,0,0,10" />
-                            <TextBox Grid.Row="0" Grid.Column="1" x:Name="TxtHotkeyFront" Height="32" Margin="0,0,8,10"
-                                     VerticalContentAlignment="Center"
-                                     ToolTip="可直接输入，如 Ctrl+Alt+T；也可点右侧「设置」按钮按键录制" />
-                            <Button Grid.Row="0" Grid.Column="2" Content="设置" Width="66" Height="32" Margin="0,0,0,10"
-                                    Tag="Front" Click="OnSetHotkeyClick" />
-
-                            <TextBlock Grid.Row="1" Grid.Column="0" Text="老板键（最小化）" Style="{StaticResource FieldLabel}" Margin="0,0,0,10" />
-                            <TextBox Grid.Row="1" Grid.Column="1" x:Name="TxtHotkeyMinimize" Height="32" Margin="0,0,8,10"
-                                     VerticalContentAlignment="Center"
-                                     ToolTip="可直接输入，如 Ctrl+Alt+B；也可点右侧「设置」按钮按键录制" />
-                            <Button Grid.Row="1" Grid.Column="2" Content="设置" Width="66" Height="32" Margin="0,0,0,10"
-                                    Tag="Minimize" Click="OnSetHotkeyClick" />
-
-                            <TextBlock Grid.Row="2" Grid.Column="0" Text="获取窗口大小" Style="{StaticResource FieldLabel}" Margin="0,0,0,10" />
-                            <TextBox Grid.Row="2" Grid.Column="1" x:Name="TxtHotkeyGetSize" Height="32" Margin="0,0,8,10"
-                                     VerticalContentAlignment="Center"
-                                     ToolTip="可直接输入，如 Ctrl+Alt+S；也可点右侧「设置」按钮按键录制" />
-                            <Button Grid.Row="2" Grid.Column="2" Content="设置" Width="66" Height="32" Margin="0,0,0,10"
-                                    Tag="GetSize" Click="OnSetHotkeyClick" />
-                        </Grid>
+                        <DockPanel Margin="0,0,0,9">
+                            <StackPanel Orientation="Horizontal">
+                                <Border Width="3" Height="13" CornerRadius="2"
+                                        Background="{StaticResource AccentGradient}" VerticalAlignment="Center" />
+                                <TextBlock Text="运行日志" Style="{StaticResource SectionTitle}" Margin="9,0,0,0" />
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                                <Button x:Name="BtnToggleLog" Content="收起" Style="{StaticResource GhostButton}"
+                                        Height="26" MinWidth="54" Click="OnToggleLogClick" />
+                                <Button Content="清空" Style="{StaticResource GhostButton}" Height="26" MinWidth="54"
+                                        Click="OnClearLogClick" />
+                                <Button Content="导出" Style="{StaticResource GhostButton}" Height="26" MinWidth="54"
+                                        Margin="0" Click="OnExportLogClick" />
+                            </StackPanel>
+                        </DockPanel>
+                        <TextBox x:Name="TxtLog" Style="{StaticResource TerminalBox}" Height="118"
+                                 VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" />
                     </StackPanel>
                 </Border>
 
-            </StackPanel>
-        </ScrollViewer>
+                <!-- 操作按钮 -->
+                <StackPanel Grid.Row="3">
+                    <WrapPanel Margin="0,0,0,9">
+                        <Button Content="一键启动" Style="{StaticResource PrimaryButton}" MinWidth="112" Click="OnLaunchClick" />
+                        <Button Content="前置全部" Style="{StaticResource SecondaryButton}" Click="OnBringAllClick" />
+                        <Button Content="一键退出游戏" Style="{StaticResource DangerButton}" Click="OnShutdownGamesClick" />
+                        <Button Content="老板键" Style="{StaticResource SecondaryButton}" MinWidth="76" Click="OnBossKeyClick" />
+                        <Button Content="获取窗口大小" Style="{StaticResource SecondaryButton}" MinWidth="106" Click="OnGetSizeClick" />
+                        <Button Content="保存配置" Style="{StaticResource SecondaryButton}" Click="OnSaveConfigClick" />
+                    </WrapPanel>
 
-        <!-- 日志 -->
-        <Border Grid.Row="2" Style="{StaticResource Card}" Margin="0,0,0,12">
-            <StackPanel>
-                <DockPanel Margin="0,0,0,8">
-                    <TextBlock Text="运行日志" Style="{StaticResource SectionTitle}" Margin="0" />
-                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                        <Button Content="清空" Height="26" MinWidth="60" Margin="0,0,8,0" Click="OnClearLogClick" />
-                        <Button Content="导出" Height="26" MinWidth="60" Click="OnExportLogClick" />
-                    </StackPanel>
-                </DockPanel>
-                <TextBox x:Name="TxtLog" Height="150" IsReadOnly="True" AcceptsReturn="True"
-                         TextWrapping="NoWrap" FontFamily="Consolas" FontSize="12"
-                         VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" />
-            </StackPanel>
-        </Border>
-
-        <!-- 操作按钮 -->
-        <WrapPanel Grid.Row="3" Orientation="Horizontal">
-            <Button Content="一键启动" Style="{StaticResource ActionButton}" MinWidth="120" Click="OnLaunchClick" />
-            <Button Content="前置全部" Style="{StaticResource ActionButton}" Click="OnBringAllClick" />
-            <Button Content="老板键" Style="{StaticResource ActionButton}" Click="OnBossKeyClick" />
-            <Button Content="获取窗口大小" Style="{StaticResource ActionButton}" MinWidth="112" Click="OnGetSizeClick" />
-            <Button Content="保存配置" Style="{StaticResource ActionButton}" Click="OnSaveConfigClick" />
-            <Button Content="检查更新" Style="{StaticResource ActionButton}" MinWidth="96" Click="OnCheckUpdateClick" />
-            <Button Content="更新日志" Style="{StaticResource ActionButton}" MinWidth="96" Click="OnShowChangeLogClick" />
-            <Button Content="GitHub 主页" Style="{StaticResource ActionButton}" MinWidth="108" Click="OnOpenRepoClick" />
-            <CheckBox x:Name="ChkAutoUpdate" Content="启动时自动检查更新" VerticalAlignment="Center"
-                      Margin="6,0,0,10" ToolTip="开启后每次启动会联网查询 GitHub 上的最新版本"
-                      Click="OnAutoUpdateChanged" />
-            <CheckBox x:Name="ChkAutoDownload" Content="自动下载更新" VerticalAlignment="Center"
-                      Margin="10,0,0,10" ToolTip="发现新版本时后台下好整包，重启即换成新版；关闭则只提示下载地址"
-                      Click="OnAutoDownloadChanged" />
-        </WrapPanel>
-    </Grid>
+                    <DockPanel LastChildFill="False">
+                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                            <CheckBox x:Name="ChkAutoUpdate" Content="自动检查更新" Style="{StaticResource OptionCheck}"
+                                      Margin="8,0,0,0" ToolTip="开启后每次启动会联网查询 GitHub 上的最新版本"
+                                      Click="OnAutoUpdateChanged" />
+                            <CheckBox x:Name="ChkAutoDownload" Content="自动下载" Style="{StaticResource OptionCheck}"
+                                      Margin="14,0,0,0" ToolTip="发现新版本时后台下好整包，重启即换成新版；关闭则只提示下载地址"
+                                      Click="OnAutoDownloadChanged" />
+                        </StackPanel>
+                        <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
+                            <Button Content="检查更新" Style="{StaticResource GhostButton}" Click="OnCheckUpdateClick" />
+                            <Button Content="更新日志" Style="{StaticResource GhostButton}" Click="OnShowChangeLogClick" />
+                            <Button Content="GitHub 主页" Style="{StaticResource GhostButton}" Click="OnOpenRepoClick" />
+                        </StackPanel>
+                    </DockPanel>
+                </StackPanel>
+            </Grid>
+        </Grid>
+    </Border>
 </Window>

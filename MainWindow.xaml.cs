@@ -905,6 +905,7 @@ public partial class MainWindow : Window
             if (!result.Succeeded || result.Info is null)
             {
                 _log.Add($"检查更新失败：{result.Error}");
+                UpdateLog.Write($"检查更新失败：{result.Error}（当前 {UpdateService.CurrentVersionText}）");
                 if (!silent)
                 {
                     MessageBox.Show(
@@ -941,6 +942,7 @@ public partial class MainWindow : Window
             if (_config.AutoDownloadUpdate)
             {
                 _log.Add($"发现新版本：{info.Version}（当前 {current}），开始后台下载。");
+                UpdateLog.Write($"发现新版本 {info.Version}（当前 {current}），下载地址：{info.ExeUrl}");
                 _ = DownloadUpdateAsync(info, current, manual: !silent);
                 return;
             }

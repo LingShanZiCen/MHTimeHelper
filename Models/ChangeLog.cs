@@ -35,6 +35,7 @@ public static class ChangeLog
     /// <summary>固定展示顺序：新增、优化、修复、更新。</summary>
     public static IReadOnlyList<string> Categories { get; } = ["新增", "优化", "修复", DefaultCategory];
 
+    private const string Version104 = "1.0.4";
     private const string Version103 = "1.0.3";
     private const string Version102 = "1.0.2";
     private const string Version101 = "1.0.1";
@@ -43,6 +44,15 @@ public static class ChangeLog
     /// <summary>内置日志：版本号（不含 v 前缀）→ 条目原文。</summary>
     private static readonly Dictionary<string, string[]> BuiltIn = new(StringComparer.OrdinalIgnoreCase)
     {
+        [Version104] =
+        [
+            "修复：网络连不上 GitHub 下载页时「已经发现新版本，却一直卡着下不动」——现在会自动切换多条加速线路，一条不通换下一条",
+            "优化：下载改为断点续传，中断后从上次的位置继续，不再从 0 重新下 70 MB",
+            "优化：单条线路失败会先在原地重试一次再换线路，网络临时抖动不再导致整次更新作废",
+            "优化：下载超时判定改为「连续一段时间收不到数据」才算失败，慢速网络也能下完（此前有 10 分钟总时长硬限制）",
+            "新增：更新过程写入程序目录下的 update.log，检查、下载、替换每一步都有记录，出问题可直接查看原因",
+            "新增：版本清单支持配置多条下载地址（exeUrls），镜像与官方直链可同时列出，客户端自动择优",
+        ],
         [Version103] =
         [
             "新增：画面比例可直接在软件里改（16:9 / 4:3 / 竖屏，含 4K 变体），改动会写进游戏自己的设置文件，效果等同于在启动器里切换",

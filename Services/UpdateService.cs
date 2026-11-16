@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Reflection;
 using System.Text.Json;
 using Nightforge.Models;
@@ -69,14 +70,19 @@ public sealed record UpdateCheckResult(UpdateInfo? Info, string? Error)
 
 /// <summary>
 /// 联网检查更新。
-/// 主通道读仓库里的 version.json（改一行就能推送新版本通知，不必发 Release）；
-/// 备用通道读 GitHub Releases 的 latest 接口，release 一发就能被老版本客户端发现。
+/// 主通道用 GitHub Contents 接口直读仓库里的 version.json —— 这个接口不经过 CDN 缓存，
+/// 发版后立刻就能读到新版本号；raw / jsDelivr 只作为备用（它们都有几分钟到几小时的缓存，
+/// 曾经出现过「新版本已经发了，客户端读到的还是旧清单」的情况）。
+/// 最后的兜底是 Releases 的 latest 接口：release 一发就能被老版本客户端发现。
 /// </summary>
 public static class UpdateService
 {
     public const string RepoUrl = "https://github.com/LingShanZiCen/MHTimeHelper";
     public const string ReleasesUrl = RepoUrl + "/releases";
     public const string IssuesUrl = RepoUrl + "/issues";
+
+    /// <summary>主通道：Contents 接口直读（不缓存，永远是最新的清单）。</summary>
+    private const string ManifestUrlApi = "https://api.github.com/repos/LingShanZiCen/MHTimeHelper/contents/version.json?ref=main";
 
     private const string ManifestUrl = "https://raw.githubusercontent.com/LingShanZiCen/MHTimeHelper/main/version.json";
     private const string ManifestUrlCdn = "https://cdn.jsdelivr.net/gh/LingShanZiCen/MHTimeHelper@main/version.json";
@@ -122,13 +128,18 @@ public static class UpdateService
     {
         var client = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
         // GitHub 接口强制要求 User-Agent，缺了会直接返回 403
+        // Accept 不在这里统一设置：Contents 接口需要 application/vnd.github.raw 才返回文件原文，
+        // 统一设成 application/json 会退化成 base64 元数据。
         client.DefaultRequestHeaders.UserAgent.ParseAdd("Nightforge-Updater/1.0");
-        client.DefaultRequestHeaders.Accept.ParseAdd("application/json");
         return client;
     }
 
     /// <summary>
     /// 联网查询最新版本。任何异常都不向外抛，统一收进 Error，避免拖垮主程序。
+    ///
+    /// 关键点：几个通道的缓存时间不一样（raw 约 5 分钟，jsDelivr 的 @main 可能几小时），
+    /// 所以不能「谁先返回就用谁」——否则刚发的新版会被缓存里的旧版挡住。
+    /// 这里并发拉全部通道，取版本号最高的那个。
     /// </summary>
     public static async Task<UpdateCheckResult> CheckAsync(CancellationToken ct = default)
     {
@@ -137,40 +148,46 @@ public static class UpdateService
         // 支持用环境变量指向自建/镜像的 version.json，便于内网分发与本地调试
         string? overrideUrl = Environment.GetEnvironmentVariable("NIGHTFORGE_UPDATE_MANIFEST");
         bool overridden = !string.IsNullOrWhiteSpace(overrideUrl);
-        string[] manifestUrls = overridden
-            ? [overrideUrl!.Trim()]
-            : [ManifestUrl, ManifestUrlCdn, ManifestUrlFastly, ManifestUrlMaster];
-
-        foreach (string url in manifestUrls)
-        {
-            try
-            {
-                using var response = await Http.GetAsync(url, ct).ConfigureAwait(false);
-                if (!response.IsSuccessStatusCode)
-                {
-                    errors.Add($"version.json HTTP {(int)response.StatusCode}");
-                    continue;
-                }
-
-                string json = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-                UpdateInfo? info = ParseManifest(json);
-                if (info is null)
-                {
-                    errors.Add("version.json 内容无法解析");
-                    continue;
-                }
-
-                return new UpdateCheckResult(info, null);
-            }
-            catch (Exception ex)
-            {
-                errors.Add(ex is TaskCanceledException or OperationCanceledException ? "version.json 请求超时" : $"version.json {ex.Message}");
-            }
-        }
 
         if (overridden)
         {
-            return new UpdateCheckResult(null, string.Join("；", errors));
+            (UpdateInfo? single, string? singleError) = await FetchManifestAsync(overrideUrl!.Trim(), ct).ConfigureAwait(false);
+            return single is not null
+                ? new UpdateCheckResult(single, null)
+                : new UpdateCheckResult(null, singleError ?? "version.json 读取失败");
+        }
+
+        string[] manifestUrls = [ManifestUrlApi, ManifestUrl, ManifestUrlCdn, ManifestUrlFastly, ManifestUrlMaster];
+
+        Task<(UpdateInfo? Info, string? Error)>[] tasks = manifestUrls
+            .Select(url => FetchManifestAsync(url, ct))
+            .ToArray();
+
+        (UpdateInfo? Info, string? Error)[] fetched = await Task.WhenAll(tasks).ConfigureAwait(false);
+
+        UpdateInfo? best = null;
+        foreach ((UpdateInfo? info, string? error) in fetched)
+        {
+            if (info is null)
+            {
+                if (!string.IsNullOrWhiteSpace(error))
+                {
+                    errors.Add(error!);
+                }
+
+                continue;
+            }
+
+            // 取版本号最高的那份清单；版本号解析不出来的只能当兜底
+            if (best is null || IsHigher(info.Version, best.Version))
+            {
+                best = info;
+            }
+        }
+
+        if (best is not null)
+        {
+            return new UpdateCheckResult(best, null);
         }
 
         try
@@ -202,6 +219,86 @@ public static class UpdateService
         }
 
         return new UpdateCheckResult(null, string.Join("；", errors));
+    }
+
+    /// <summary>
+    /// 拉取单个 version.json 并解析。带 no-cache 头，尽量绕开中间缓存；
+    /// Contents 接口额外要求 application/vnd.github.raw 才返回文件原文。
+    /// 失败只返回原因，不抛异常（并发调用时由调用方汇总）。
+    /// </summary>
+    private static async Task<(UpdateInfo? Info, string? Error)> FetchManifestAsync(string url, CancellationToken ct)
+    {
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.CacheControl = new CacheControlHeaderValue { NoCache = true, NoStore = true };
+            // Contents 接口对 raw 与 json 返回的结构不同：要原文就明确要 raw
+            request.Headers.Accept.ParseAdd("application/vnd.github.raw");
+
+            using HttpResponseMessage response = await Http.SendAsync(request, ct).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                return (null, $"version.json HTTP {(int)response.StatusCode}");
+            }
+
+            string text = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+            UpdateInfo? info = ParseManifest(text);
+
+            // 万一接口还是回了元数据（含 base64 的 content 字段），就地解出来再解析一次
+            if (info is null && TryDecodeContentsMetadata(text, out string? decoded))
+            {
+                info = ParseManifest(decoded!);
+            }
+
+            return info is not null ? (info, null) : (null, "version.json 内容无法解析");
+        }
+        catch (Exception ex)
+        {
+            return (null, ex is TaskCanceledException or OperationCanceledException
+                ? "version.json 请求超时"
+                : $"version.json {ex.Message}");
+        }
+    }
+
+    /// <summary>从 Contents 接口的元数据里取出 base64 的 content 并解码。</summary>
+    private static bool TryDecodeContentsMetadata(string text, out string? decoded)
+    {
+        decoded = null;
+
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(text);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                return false;
+            }
+
+            if (GetString(doc.RootElement, "encoding") is not "base64"
+                || GetString(doc.RootElement, "content") is not { Length: > 0 } content)
+            {
+                return false;
+            }
+
+            decoded = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(content.Replace("\n", "")));
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>candidate 是否比 reference 更新（版本号解析失败的一方视为更旧）。</summary>
+    private static bool IsHigher(string candidate, string reference)
+    {
+        Version? a = ParseVersion(candidate);
+        if (a is null)
+        {
+            return false;
+        }
+
+        Version? b = ParseVersion(reference);
+        return b is null || a > b;
     }
 
     /// <summary>判断远程版本是否比本机新。</summary>

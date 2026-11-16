@@ -8,8 +8,8 @@
     "https://ghproxy.net/https://github.com/LingShanZiCen/MHTimeHelper/releases/download/v1.0.4/Nightforge.exe",
     "https://github.com/LingShanZiCen/MHTimeHelper/releases/download/v1.0.4/Nightforge.exe"
   ],
-  "sha256": "d1f5c54a37d59194bdddd0285a5d21f76d0793e0e7aabcbd57a0737f5a4fc032",
-  "size": 70485279,
+  "sha256": "ccd6ca1f33c0c483ac85fd67c266beca0f03f0fd87835baa7324e0ff50518ce7",
+  "size": 70486829,
   "notes": "幻夜工坊 1.0.4：修好了「发现新版本却下不动」的自动更新问题，下载改走多条加速线路并支持断点续传",
   "changes": [
     "修复：网络连不上 GitHub 下载页时「已经发现新版本，却一直卡着下不动」——现在会自动切换多条加速线路，一条不通换下一条",

@@ -51,6 +51,27 @@ public sealed partial class AutoLoginWindow : Window
         SetStatus(OcrService.IsAvailable
             ? "就绪。可先点「识别测试」，确认画面里的字能认出来。"
             : $"系统 OCR 不可用：{OcrService.UnavailableReason}");
+
+        // 权限不对等时系统会丢掉模拟点击，表现为「点了没反应」，这里提前说明，别让人对着不动的界面猜
+        if (!IsRunningAsAdministrator())
+        {
+            SetStatus("提示：本程序不是以管理员身份运行。如果游戏是以管理员身份启动的（多数情况如此），"
+                      + "登录时的模拟点击会被系统拦掉，请关掉本程序后右键「以管理员身份运行」。");
+        }
+    }
+
+    private static bool IsRunningAsAdministrator()
+    {
+        try
+        {
+            using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
+            return new System.Security.Principal.WindowsPrincipal(identity)
+                .IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private void OnClosing(object? sender, System.ComponentModel.CancelEventArgs e)

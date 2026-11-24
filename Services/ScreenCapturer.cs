@@ -210,6 +210,37 @@ public static class ScreenCapturer
         }
     }
 
+    /// <summary>
+    /// 从屏幕拷一块矩形（物理像素），拷之前先把指定窗口提到前台。
+    ///
+    /// 用途：账号历史列表有时是贴在悬浮窗下面的独立小弹窗，只截窗口本身看不到它，
+    /// 所以按「悬浮窗 + 下面多留一截」的区域从屏幕拷。坐标原点就是这块区域的左上角。
+    /// </summary>
+    public static Frame? CaptureScreenRect(IntPtr windowToRaise, int x, int y, int width, int height)
+    {
+        if (width <= 0 || height <= 0 || width > 8000 || height > 8000)
+        {
+            return null;
+        }
+
+        if (windowToRaise != IntPtr.Zero)
+        {
+            if (!WindowFocus.Force(windowToRaise))
+            {
+                return null;
+            }
+
+            Thread.Sleep(140);
+
+            if (NativeMethods.GetForegroundWindow() != windowToRaise)
+            {
+                return null;
+            }
+        }
+
+        return CaptureScreen(x, y, width, height);
+    }
+
     /// <summary>兜底：窗口提到前台后直接从屏幕拷贝客户区那一块。</summary>
     private static Frame? CaptureFromScreen(IntPtr hwnd, int width, int height)
     {
@@ -219,6 +250,11 @@ public static class ScreenCapturer
             return null;
         }
 
+        return CaptureScreen(origin.X, origin.Y, width, height);
+    }
+
+    private static Frame? CaptureScreen(int x, int y, int width, int height)
+    {
         IntPtr screenDc = IntPtr.Zero;
         IntPtr memoryDc = IntPtr.Zero;
         IntPtr bitmap = IntPtr.Zero;
@@ -240,7 +276,7 @@ public static class ScreenCapturer
             }
 
             previous = NativeMethods.SelectObject(memoryDc, bitmap);
-            bool ok = NativeMethods.BitBlt(memoryDc, 0, 0, width, height, screenDc, origin.X, origin.Y,
+            bool ok = NativeMethods.BitBlt(memoryDc, 0, 0, width, height, screenDc, x, y,
                 NativeMethods.SRCCOPY);
             if (!ok)
             {

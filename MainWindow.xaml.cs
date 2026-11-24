@@ -18,8 +18,6 @@ public partial class MainWindow : Window
     private readonly LogService _log = new();
     private readonly WindowService _windows;
     private readonly GameShutdownService _shutdown = new();
-    private readonly AutoLoginService _autoLogin;
-    private LoginSettings _loginSettings;
     private HotkeyService? _hotkeys;
     private WinForms.NotifyIcon? _tray;
     private AppConfig _config = new();
@@ -37,8 +35,6 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         _windows = new WindowService(_log);
-        _autoLogin = new AutoLoginService(_log);
-        _loginSettings = LoginSettingsService.Load();
         _log.LineAdded += AppendLog;
         Loaded += OnLoaded;
         Closing += OnClosing;
@@ -432,12 +428,6 @@ public partial class MainWindow : Window
 
             _log.Add($"共捕获 {_gameWindows.Count} 个窗口，开始排列...");
             ArrangeWindows(cfg, _gameWindows);
-
-            // 排列完再登录：窗口尺寸定了，OCR 认字的位置才和之后实际显示的一致
-            if (_loginSettings.Enabled)
-            {
-                await RunAutoLoginAsync();
-            }
         }
         catch (Exception ex)
         {
@@ -447,98 +437,6 @@ public partial class MainWindow : Window
         {
             _busy = false;
         }
-    }
-
-    // ================= 自动登录 =================
-
-    private void OnAutoLoginClick(object sender, RoutedEventArgs e)
-    {
-        var dialog = new AutoLoginWindow(_loginSettings, _autoLogin, () => _gameWindows)
-        {
-            Owner = IsVisible ? this : null
-        };
-
-        dialog.ShowDialog();
-        _loginSettings = LoginSettingsService.Load();
-        _log.Add(_loginSettings.Enabled
-            ? "自动登录已开启：下次「一键启动」会依次选服选角色。"
-            : "自动登录未开启。");
-    }
-
-    private async void OnRunAutoLoginClick(object sender, RoutedEventArgs e)
-    {
-        if (_busy)
-        {
-            _log.Add("正在处理其他操作，稍后再试。");
-            return;
-        }
-
-        _busy = true;
-        try
-        {
-            _gameWindows = RefreshWindows();
-            await RunAutoLoginAsync();
-        }
-        catch (Exception ex)
-        {
-            _log.Add($"自动登录出错：{ex.Message}");
-        }
-        finally
-        {
-            _busy = false;
-        }
-    }
-
-    /// <summary>
-    /// 按「自动登录设置」里的内容，逐个窗口认字、点服务器、点角色。
-    /// 窗口是按启动顺序对应的，第 N 个窗口用第 N 行填写的内容。
-    /// </summary>
-    private async Task RunAutoLoginAsync()
-    {
-        if (!_loginSettings.Enabled)
-        {
-            _log.Add("自动登录未启用，跳过（可在「自动登录设置」里打开）。");
-            return;
-        }
-
-        if (!OcrService.IsAvailable)
-        {
-            _log.Add($"自动登录无法执行：{OcrService.UnavailableReason}");
-            return;
-        }
-
-        if (_gameWindows.Count == 0)
-        {
-            _log.Add("自动登录：没有可用的游戏窗口。");
-            return;
-        }
-
-        _log.AddSeparator();
-        _log.Add($"开始自动登录（{_gameWindows.Count} 个窗口，窗口按顺序对应设置里的行）");
-
-        for (int i = 0; i < _gameWindows.Count && i < LoginSettingsService.MaxWindows; i++)
-        {
-            WindowLoginTarget target = _loginSettings.ForWindow(i + 1);
-            if (target.IsEmpty)
-            {
-                _log.Add($"窗口 {i + 1}：未填写账号/服务器/角色，跳过。");
-                continue;
-            }
-
-            if (!NativeMethods.IsWindow(_gameWindows[i]))
-            {
-                _log.Add($"窗口 {i + 1}：句柄已失效，跳过。");
-                continue;
-            }
-
-            _log.Add($"窗口 {i + 1}：{target.Describe()}");
-            string? error = await _autoLogin.LoginAsync(
-                _gameWindows[i], target, _loginSettings, _log.Add, CancellationToken.None);
-
-            _log.Add(error is null ? $"窗口 {i + 1}：登录流程走完。" : $"窗口 {i + 1}：{error}");
-        }
-
-        _log.Add("自动登录结束。");
     }
 
     /// <summary>

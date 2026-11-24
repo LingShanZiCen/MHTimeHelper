@@ -319,9 +319,6 @@
                     <WrapPanel Margin="0,0,0,9">
                         <Button Content="一键启动" Style="{StaticResource PrimaryButton}" MinWidth="112" Click="OnLaunchClick" />
                         <Button Content="前置全部" Style="{StaticResource SecondaryButton}" Click="OnBringAllClick" />
-                        <Button Content="开始登录" Style="{StaticResource SecondaryButton}" MinWidth="88" Click="OnRunAutoLoginClick"
-                                ToolTip="按「自动登录设置」里填的内容，给当前已打开的窗口逐个选服选角色" />
-                        <Button Content="自动登录设置" Style="{StaticResource SecondaryButton}" MinWidth="106" Click="OnAutoLoginClick" />
                         <Button Content="一键退出游戏" Style="{StaticResource DangerButton}" Click="OnShutdownGamesClick" />
                         <Button Content="老板键" Style="{StaticResource SecondaryButton}" MinWidth="76" Click="OnBossKeyClick" />
                         <Button Content="获取窗口大小" Style="{StaticResource SecondaryButton}" MinWidth="106" Click="OnGetSizeClick" />

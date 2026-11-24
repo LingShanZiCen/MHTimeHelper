@@ -897,14 +897,23 @@ public sealed class AutoLoginService
         Action<string> report,
         CancellationToken ct)
     {
-        if (!TryCaptureArea(window, out LoginArea area, out ScreenCapturer.Frame? frame) || frame is null)
+        // 这里只抓客户区，不带窗口下面那半屏：百分比坐标要和主循环那一帧同尺寸，
+        // 否则「搜索框 26%」乘到高一截的画面上，就正好落到左栏第二个按钮（新服推荐）上了。
+        if (!TryCaptureArea(window, out LoginArea area, out ScreenCapturer.Frame? frame, captureBelow: false)
+            || frame is null)
         {
             return (false, "服务器列表页抓不到画面，先在游戏窗口上点一下再重试");
         }
 
+        // 调用方给的搜索框坐标来自上一帧。为了不让两帧之间差一个像素就点飞，
+        // 在这一帧上重新认一次（灰色的「搜索」只有加强通道认得出）。
+        List<TextLine> hereLines = await OcrService.RecognizeAsync(frame.Value, thorough: true)
+            .ConfigureAwait(true);
+        TextLine box = FindSearchBox(hereLines) ?? searchBox;
+
         report($"这一屏没有「{server}」，用左上角的搜索框搜一下");
 
-        await ClickPointAsync(area, searchBox, "服务器搜索框", report, ct).ConfigureAwait(true);
+        await ClickPointAsync(area, box, "服务器搜索框", report, ct).ConfigureAwait(true);
         await Task.Delay(450, ct).ConfigureAwait(true);
 
         // 框里可能留着上次搜的字，先清干净，否则输入会拼在旧字后面
@@ -948,7 +957,7 @@ public sealed class AutoLoginService
 
         if (result is null)
         {
-            if (!TryCaptureArea(window, out area, out frame) || frame is null)
+            if (!TryCaptureArea(window, out area, out frame, captureBelow: false) || frame is null)
             {
                 return (false, "搜完服务器之后抓不到画面");
             }
@@ -956,7 +965,7 @@ public sealed class AutoLoginService
             string dump = SaveDebug(frame, "nightforge_server_search.bmp");
             string seen = string.Join("」「", (await OcrService.RecognizeAsync(frame.Value, thorough: true)
                 .ConfigureAwait(true))
-                .Where(l => l.CenterY > searchBox.CenterY + 2)
+                .Where(l => l.CenterY > box.CenterY + 2)
                 .Take(6)
                 .Select(l => l.Text));
 
@@ -974,7 +983,8 @@ public sealed class AutoLoginService
         // 抓一帧，看看搜索框下方有没有目标服的结果行
         async Task<TextLine?> CaptureAndFindResult()
         {
-            if (!TryCaptureArea(window, out LoginArea shot, out ScreenCapturer.Frame? shotFrame)
+            if (!TryCaptureArea(window, out LoginArea shot, out ScreenCapturer.Frame? shotFrame,
+                    captureBelow: false)
                 || shotFrame is null)
             {
                 return null;
@@ -985,7 +995,7 @@ public sealed class AutoLoginService
 
             // 点击坐标按这一帧算，别用之前那一帧的
             area = shot;
-            TextLine? hit = FindServerResult(shotLines, server, searchBox);
+            TextLine? hit = FindServerResult(shotLines, server, box);
 
             return hit is null
                 ? null
@@ -995,7 +1005,8 @@ public sealed class AutoLoginService
         // 搜索框那一行现在是不是已经填上要被搜的字了
         async Task<bool> SearchBoxHasTextAsync()
         {
-            if (!TryCaptureArea(window, out _, out ScreenCapturer.Frame? shot) || shot is null)
+            if (!TryCaptureArea(window, out _, out ScreenCapturer.Frame? shot, captureBelow: false)
+                || shot is null)
             {
                 return false;
             }
@@ -1005,7 +1016,7 @@ public sealed class AutoLoginService
 
             string target = OcrService.Normalize(server);
 
-            return shotLines.Any(l => Math.Abs(l.CenterY - searchBox.CenterY) < 2.5
+            return shotLines.Any(l => Math.Abs(l.CenterY - box.CenterY) < 2.5
                                        && l.CenterX < 30
                                        && OcrService.Similarity(OcrService.Normalize(l.Text), target) >= 0.5);
         }
@@ -1206,7 +1217,19 @@ public sealed class AutoLoginService
         return TryCaptureArea(overlay != IntPtr.Zero ? overlay : gameHwnd, out area, out frame);
     }
 
-    private static bool TryCaptureArea(IntPtr window, out LoginArea area, out ScreenCapturer.Frame? frame)
+    /// <summary>
+    /// 抓「窗口客户区」这一块，并记下它的屏幕位置，供按百分比点击用。
+    ///
+    /// captureBelow=true 时下面再多留半屏：账号历史列表是贴在悬浮窗下面的小弹窗，
+    /// 只截窗口本身看不到它。**但这时帧高不再是客户区高度**，百分比含义也跟着变——
+    /// 把这种帧算出来的百分比拿去乘客户区高度，点击就会整体往下掉。
+    /// 服务器列表页曾经因此点「搜索框」点成了「新服推荐」。所以只有换号流程才要这一段。
+    /// </summary>
+    private static bool TryCaptureArea(
+        IntPtr window,
+        out LoginArea area,
+        out ScreenCapturer.Frame? frame,
+        bool captureBelow = true)
     {
         area = default;
         frame = null;
@@ -1230,7 +1253,7 @@ public sealed class AutoLoginService
         }
 
         // 账号历史列表可能画在窗户外，下面多留半屏；主窗口太大就不留了
-        int extra = height <= 800 ? height / 2 : 0;
+        int extra = captureBelow && height <= 800 ? height / 2 : 0;
         frame = ScreenCapturer.CaptureScreenRect(window, origin.X, origin.Y, width, height + extra);
         if (frame is null)
         {
@@ -1987,6 +2010,9 @@ public sealed class AutoLoginService
     /// <summary>给命令行探针用：直接看这一屏搜出来的结果行是哪一行。</summary>
     public static TextLine? FindServerResultForProbe(List<TextLine> lines, string server, TextLine searchBox)
         => FindServerResult(lines, server, searchBox);
+
+    /// <summary>给命令行探针用：看这一屏算出来的搜索框是哪一行、换算成像素落在哪。</summary>
+    public static TextLine? FindSearchBoxForProbe(List<TextLine> lines) => FindSearchBox(lines);
 
     private static TextLine? FindServerResult(List<TextLine> lines, string server, TextLine searchBox)
     {

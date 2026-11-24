@@ -900,15 +900,6 @@ public sealed class AutoLoginService
 
         report($"账号框里现在是「{field.Text}」，点它右边的下三角，打开账号历史…");
 
-        // 表单里本来就是目标账号：不必点下三角，直接提交（多一次保险，省掉一堆点击）
-        if (submit is not null && AccountMatches(field.Text, account))
-        {
-            report($"账号框里已经是「{field.Text}」，不用换号，直接点「登录」");
-            await ClickPointAsync(area, submit, "登录", report, ct).ConfigureAwait(true);
-            await Task.Delay(3000, ct).ConfigureAwait(true);
-            return (true, null);
-        }
-
         // 2) 下三角是图不是字，OCR 看不到。按账号框这一行横向试几个位置，弹出来为止。
         List<TextLine> history = [];
         bool opened = false;
@@ -956,6 +947,15 @@ public sealed class AutoLoginService
 
         if (pick is null || bestScore < 0.6)
         {
+            // 列表没认出来，但账号框里本来就是目标号：直接把表单提交了，也算换对
+            if (submit is not null && AccountMatches(field.Text, account))
+            {
+                report($"账号框里已经是「{field.Text}」，历史列表没认出来也不要紧，直接点「登录」");
+                await ClickPointAsync(area, submit, "登录", report, ct).ConfigureAwait(true);
+                await Task.Delay(3000, ct).ConfigureAwait(true);
+                return (true, null);
+            }
+
             string seen = string.Join("」「", history.Take(6).Select(l => l.Text));
             return (false, $"账号历史里没看到「{account}」" + (seen.Length > 0 ? $"（这一列是「{seen}」）" : "")
                            + "。先用这个账号手动登录一次，让客户端记住它，再点开始登录。");

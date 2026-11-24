@@ -76,7 +76,69 @@ internal static class NativeMethods
     public const uint BM_CLICK = 0x00F5;
 
     public const byte VK_RETURN = 0x0D;
+    public const byte VK_MENU = 0x12;
     public const uint KEYEVENTF_KEYUP = 0x0002;
+
+    /// <summary>把窗口提到 Z 序最上层（配合 SetForegroundWindow 提高抢前台成功率）。</summary>
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool BringWindowToTop(IntPtr hWnd);
+
+    // ---------- 权限（UIPI 检查用） ----------
+    // 目标进程以管理员身份运行时，普通权限进程发给它的模拟鼠标/键盘会被系统直接丢掉，
+    // 所以点之前要先确认两边的权限是否对等。
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr OpenProcess(uint dwDesiredAccess, [MarshalAs(UnmanagedType.Bool)] bool bInheritHandle, uint dwProcessId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool CloseHandle(IntPtr hObject);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool OpenProcessToken(IntPtr hProcess, uint desiredAccess, out IntPtr tokenHandle);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetTokenInformation(IntPtr tokenHandle, int tokenInformationClass,
+        out uint tokenInformation, int tokenInformationLength, out int returnLength);
+
+    public const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+    public const uint TOKEN_QUERY = 0x0008;
+    public const int TokenElevation = 20;
+
+    /// <summary>该进程是否以提升（管理员）权限运行；读不到时返回 null。</summary>
+    public static bool? IsProcessElevated(uint processId)
+    {
+        IntPtr process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, processId);
+        if (process == IntPtr.Zero)
+        {
+            return null;
+        }
+
+        IntPtr token = IntPtr.Zero;
+        try
+        {
+            if (!OpenProcessToken(process, TOKEN_QUERY, out token))
+            {
+                return null;
+            }
+
+            return GetTokenInformation(token, TokenElevation, out uint elevated, sizeof(uint), out _)
+                ? elevated != 0
+                : null;
+        }
+        finally
+        {
+            if (token != IntPtr.Zero)
+            {
+                CloseHandle(token);
+            }
+
+            CloseHandle(process);
+        }
+    }
 
     // ---------- 窗口 ----------
     public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
@@ -167,6 +229,95 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
 
+    // ---------- 鼠标（自动登录录制 / 回放用） ----------
+    public const int VK_LBUTTON = 0x01;
+    public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+    public const uint MOUSEEVENTF_LEFTUP = 0x0004;
+
+    /// <summary>取光标位置（物理像素）。</summary>
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetCursorPos(out POINT lpPoint);
+
+    /// <summary>移动光标到指定物理像素位置。</summary>
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SetCursorPos(int x, int y);
+
+    /// <summary>按下时最高位为 1；据此轮询左键，不需要装鼠标钩子。</summary>
+    [DllImport("user32.dll")]
+    public static extern short GetAsyncKeyState(int vKey);
+
+    /// <summary>按坐标找窗口，录制时用来确认这一下点的是不是游戏窗口。</summary>
+    [DllImport("user32.dll")]
+    public static extern IntPtr WindowFromPoint(POINT point);
+
+    /// <summary>在光标当前位置产生鼠标按键事件（配合 SetCursorPos 使用）。</summary>
+    [DllImport("user32.dll")]
+    public static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, UIntPtr dwExtraInfo);
+
+    // ---------- 抓图（自动登录要认字，先得把画面拿到手） ----------
+    public const int PW_CLIENTONLY = 0x00000001;
+
+    /// <summary>Windows 8.1+ 才有：让 PrintWindow 走「完整渲染」，否则 DirectX 画的窗口抓出来是黑的。</summary>
+    public const int PW_RENDERFULLCONTENT = 0x00000002;
+
+    public const uint SRCCOPY = 0x00CC0020;
+    public const uint BI_RGB = 0;
+    public const uint DIB_RGB_COLORS = 0;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct BITMAPINFOHEADER
+    {
+        public uint biSize;
+        public int biWidth;
+        public int biHeight;
+        public ushort biPlanes;
+        public ushort biBitCount;
+        public uint biCompression;
+        public uint biSizeImage;
+        public int biXPelsPerMeter;
+        public int biYPelsPerMeter;
+        public uint biClrUsed;
+        public uint biClrImportant;
+    }
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetDC(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint nFlags);
+
+    [DllImport("gdi32.dll")]
+    public static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+
+    [DllImport("gdi32.dll")]
+    public static extern IntPtr CreateCompatibleBitmap(IntPtr hdc, int width, int height);
+
+    [DllImport("gdi32.dll")]
+    public static extern IntPtr SelectObject(IntPtr hdc, IntPtr obj);
+
+    [DllImport("gdi32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool DeleteObject(IntPtr obj);
+
+    [DllImport("gdi32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool DeleteDC(IntPtr hdc);
+
+    [DllImport("gdi32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool BitBlt(IntPtr hdcDest, int xDest, int yDest, int width, int height,
+        IntPtr hdcSrc, int xSrc, int ySrc, uint rop);
+
+    [DllImport("gdi32.dll")]
+    public static extern int GetDIBits(IntPtr hdc, IntPtr hbm, uint start, uint lines,
+        [Out] byte[] bits, ref BITMAPINFOHEADER info, uint usage);
+
     // ---------- 显示器 ----------
     [DllImport("user32.dll")]
     public static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
@@ -186,6 +337,20 @@ internal static class NativeMethods
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+    // ---------- DPI ----------
+    /// <summary>开启「每显示器 DPI 感知」。不开启时，系统会把窗口坐标按缩放比例虚拟化，
+    /// 抓图和点击都会整体偏移（实测 125% 缩放下抓到的画面串到别的窗口上）。</summary>
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SetProcessDpiAwarenessContext(IntPtr dpiContext);
+
+    /// <summary>DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 的值。</summary>
+    public static readonly IntPtr DPI_PER_MONITOR_AWARE_V2 = new(-4);
+
+    /// <summary>某个窗口当前所在显示器的 DPI（96 = 100%，120 = 125%）。</summary>
+    [DllImport("user32.dll")]
+    public static extern uint GetDpiForWindow(IntPtr hwnd);
 
     // ---------- INI ----------
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]

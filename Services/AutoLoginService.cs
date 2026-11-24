@@ -35,6 +35,12 @@ public sealed class AutoLoginService
     private static readonly double[] DropdownCandidatePercents = [87, 84, 90, 81, 93, 78];
 
     /// <summary>
+    /// 三角算「暗」的灰度上限。实测三角平均亮度 105~130、边缘 174，
+    /// 面板底色 235 以上——卡 165 能把三角整块圈进来，又不碰边框和底色。
+    /// </summary>
+    private const int TriangleDarkThreshold = 165;
+
+    /// <summary>
     /// 连续多久认不出任何登录字样，就认定已经进了游戏。
     /// 点完按钮后要加载、切场景，中途画面是空的，所以这个值要够宽（20 秒）。
     /// </summary>
@@ -877,12 +883,17 @@ public sealed class AutoLoginService
             report($"账号框里现在是「{field.Text}」，点它右边的三角，把账号列表拉出来…");
 
             // 列表可能已经开着（上一次点开了），先看一眼，别又点一下把它收回去
-            List<TextLine> history = AccountsBelow(lines, field);
+            List<TextLine> history = AccountsBelow(lines, field, frame.Value.Height, area.ClientHeight);
+
+            bool listOpened = false;
 
             if (history.Count == 0)
             {
                 // 三角是图形，OCR 看不到：先从像素里把它找出来，找不到再按常见位置试
                 double? fromPixels = FindTriangleX(frame.Value, field);
+                report(fromPixels is null
+                    ? "没在画面里认出那个三角，按几个常见位置逐个试"
+                    : $"三角在 {fromPixels.Value:F1}% 的位置");
 
                 var candidates = new List<double>();
                 if (fromPixels is not null)
@@ -894,10 +905,12 @@ public sealed class AutoLoginService
 
                 foreach (double x in candidates)
                 {
+                    int beforeHeight = area.ClientHeight;
+
                     var triangle = new TextLine("▾", x, field.CenterY, 0, 0);
                     await ClickPointAsync(area, triangle, $"账号框右边的三角（{x:F0}%）", report, ct)
                         .ConfigureAwait(true);
-                    await Task.Delay(700, ct).ConfigureAwait(true);
+                    await Task.Delay(800, ct).ConfigureAwait(true);
 
                     if (!TryCaptureLoginArea(gameHwnd, out area, out frame) || frame is null)
                     {
@@ -906,9 +919,20 @@ public sealed class AutoLoginService
 
                     lines = await OcrService.RecognizeAsync(frame.Value, thorough: true).ConfigureAwait(true);
                     field = FindShownField(lines) ?? field;
-                    history = AccountsBelow(lines, field);
+                    history = AccountsBelow(lines, field, frame.Value.Height, area.ClientHeight);
                     if (history.Count > 0)
                     {
+                        listOpened = true;
+                        break;
+                    }
+
+                    // 列表是往下展开的，展开时窗口会被撑高。哪怕一个字都没认出来，
+                    // 也不能继续点下一个候选——那一下正好把刚展开的列表点回去。
+                    if (area.ClientHeight > beforeHeight + 12)
+                    {
+                        report($"点了三角之后窗口从 {beforeHeight} 高变成 {area.ClientHeight} 高，"
+                               + "账号列表确实展开了，只是里面的账号行没认出来");
+                        listOpened = true;
                         break;
                     }
                 }
@@ -916,6 +940,14 @@ public sealed class AutoLoginService
 
             if (history.Count == 0)
             {
+                if (listOpened)
+                {
+                    string dump = SaveDebug(frame, "nightforge_switch_list.bmp");
+                    return (false, "账号列表展开了，但认不出里面的账号行"
+                                   + (dump.Length > 0 ? $"（这一屏已存到 {dump}，发我看一眼就能对上）" : "")
+                                   + "。");
+                }
+
                 lastProblem = "点了三角也没把账号列表拉出来";
                 continue;
             }
@@ -957,7 +989,11 @@ public sealed class AutoLoginService
     /// 换号用的抓图区域：账号悬浮窗整块，下面再多留一截。
     /// 账号历史有时不是画在悬浮窗里，而是单独的小弹窗贴在它下面——只截悬浮窗就永远看不到列表。
     /// </summary>
-    private readonly record struct LoginArea(int X, int Y, int Width, int Height, IntPtr Window);
+    /// <summary>
+    /// 截图区域：屏幕坐标 + 尺寸。ClientHeight 是窗口客户区自己的高度，
+    /// 比 Height 小（Height 还含下面多留的那半屏），用来把「窗外的东西」排除掉。
+    /// </summary>
+    private readonly record struct LoginArea(int X, int Y, int Width, int Height, IntPtr Window, int ClientHeight);
 
     private static bool TryCaptureLoginArea(IntPtr gameHwnd, out LoginArea area, out ScreenCapturer.Frame? frame)
     {
@@ -999,7 +1035,7 @@ public sealed class AutoLoginService
             return false;
         }
 
-        area = new LoginArea(origin.X, origin.Y, width, height + extra, window);
+        area = new LoginArea(origin.X, origin.Y, width, height + extra, window, height);
         return true;
     }
 
@@ -1059,9 +1095,10 @@ public sealed class AutoLoginService
     /// <summary>
     /// 从画面里找出账号框右边那个三角的横向位置（百分比）。找不到返回 null。
     ///
-    /// 三角是图形，OCR 完全看不到，按百分比猜差几个像素就点空（实测三角只有 10 像素宽）。
-    /// 所以直接看像素：在账号文字那一行的高度上、从文字右边缘往右扫，
-    /// 找到第一团连续的深色像素——面板底色浅、输入框白、边框也不深，深色团只能是三角。
+    /// 三角是图形，OCR 完全看不到；按百分比猜差几个像素就点空（三角只有 9 像素宽）。
+    /// 所以直接看像素：在账号文字那一行的高度带里、从文字右边缘往右扫，
+    /// 找一团连续的中等灰度像素（实测三角平均亮度 105~130，面板底色 235 以上）。
+    /// 还得像三角：上宽下窄、有几行高——否则输入框边框、分隔线会被误认。
     /// </summary>
     public static double? FindTriangleX(ScreenCapturer.Frame frame, TextLine field)
     {
@@ -1070,9 +1107,15 @@ public sealed class AutoLoginService
             return null;
         }
 
-        int x0 = (int)Math.Round(frame.Width * (field.Left + field.Width) / 100.0) + 6;
-        int y0 = (int)Math.Round(frame.Height * field.Top / 100.0) - 3;
-        int y1 = (int)Math.Round(frame.Height * (field.Top + field.Height) / 100.0) + 3;
+        // 从文字右边缘往右留一点，别把最后一个字的笔画算进来
+        int x0 = (int)Math.Round(frame.Width * (field.Left + field.Width) / 100.0) + 5;
+        int y0 = (int)Math.Round(frame.Height * field.Top / 100.0) - 4;
+        int y1 = (int)Math.Round(frame.Height * (field.Top + field.Height) / 100.0) + 4;
+
+        // 三角是「▾」：行框常常只框到字的主体，上下都留点余量
+        int pad = Math.Max(3, (y1 - y0) / 3);
+        y0 -= pad;
+        y1 += pad;
 
         x0 = Math.Clamp(x0, 1, frame.Width - 2);
         y0 = Math.Clamp(y0, 0, frame.Height - 2);
@@ -1081,18 +1124,15 @@ public sealed class AutoLoginService
         int stride = frame.Width;
         int runStart = -1;
 
-        for (int x = x0; x < frame.Width - 2; x++)
+        for (int x = x0; x < frame.Width; x++)
         {
+            // 这一列在高度带里有几像素是「中等偏暗」——三角是浅灰蓝，阈值 110 太严会全漏
             int dark = 0;
-
             for (int y = y0; y <= y1; y++)
             {
                 int offset = (y * stride + x) * 4;
-                int b = frame.Pixels[offset];
-                int g = frame.Pixels[offset + 1];
-                int r = frame.Pixels[offset + 2];
-
-                if ((r + g + b) / 3 < 110)
+                if ((frame.Pixels[offset] + frame.Pixels[offset + 1] + frame.Pixels[offset + 2]) / 3
+                    < TriangleDarkThreshold)
                 {
                     dark++;
                 }
@@ -1100,25 +1140,77 @@ public sealed class AutoLoginService
 
             bool isDark = dark >= 2;
 
-            if (isDark && runStart < 0)
+            if (isDark)
             {
-                runStart = x;
-            }
-            else if (!isDark && runStart >= 0)
-            {
-                int runWidth = x - runStart;
-
-                // 太窄是边框/噪点，太宽是别的东西
-                if (runWidth is >= 3 and <= 26)
+                if (runStart < 0)
                 {
-                    return (runStart + runWidth / 2.0) * 100.0 / stride;
+                    runStart = x;
                 }
 
-                runStart = -1;
+                continue;
+            }
+
+            if (runStart < 0)
+            {
+                continue;
+            }
+
+            int width = x - runStart;
+            if (width is >= 3 and <= 26 && LooksLikeTriangle(frame, runStart, x - 1, y0, y1))
+            {
+                return (runStart + width / 2.0) * 100.0 / stride;
+            }
+
+            runStart = -1;
+        }
+
+        // 一直暗到画面右边（比如碰到窗口边框）：不认
+        return null;
+    }
+
+    /// <summary>
+    /// 这一团像素像不像「▾」：有多行高、最宽的那行不在最底下（上宽下窄），
+    /// 宽度要够（实测 9 像素），但不能宽到像个方块。
+    /// </summary>
+    private static bool LooksLikeTriangle(
+        ScreenCapturer.Frame frame, int startX, int endX, int y0, int y1)
+    {
+        int stride = frame.Width;
+        var widths = new List<int>();
+
+        for (int y = y0; y <= y1; y++)
+        {
+            int count = 0;
+            for (int x = startX; x <= endX; x++)
+            {
+                int offset = (y * stride + x) * 4;
+                if ((frame.Pixels[offset] + frame.Pixels[offset + 1] + frame.Pixels[offset + 2]) / 3
+                    < TriangleDarkThreshold)
+                {
+                    count++;
+                }
+            }
+
+            if (count > 0)
+            {
+                widths.Add(count);
             }
         }
 
-        return null;
+        if (widths.Count < 3)
+        {
+            return false;
+        }
+
+        int max = widths.Max();
+        if (max < 4 || max > endX - startX + 1)
+        {
+            return false;
+        }
+
+        // 最宽的一行要落在上半段（下宽上窄的实心块、竖线都不满足）
+        int maxAt = widths.IndexOf(max);
+        return maxAt <= widths.Count / 2 + 1;
     }
 
     /// <summary>
@@ -1137,20 +1229,58 @@ public sealed class AutoLoginService
         return list.Where(x => x is > 5 and < 96).Distinct();
     }
 
-    /// <summary>账号框下面那些像账号的行（历史记录列表）。</summary>
-    private static List<TextLine> AccountsBelow(List<TextLine> lines, TextLine field)
-        => lines
-            .Where(l => l.CenterY > field.CenterY + 2 && LooksLikeAccountText(l.Text))
+    /// <summary>
+    /// 账号框下面那些像账号的行（历史记录列表）。
+    ///
+    /// 必须限定在窗口客户区内：抓图时往下多留了半屏看贴在窗外的弹窗，
+    /// 但那半屏其实是屏幕上的游戏窗口和桌面——实测那里的「健康游戏忠告」含 @，
+    /// 被当成账号列表，程序一次三角都没点就报「列表里没有这个号」。
+    /// </summary>
+    private static List<TextLine> AccountsBelow(
+        List<TextLine> lines, TextLine field, int frameHeight, int clientHeight)
+    {
+        double clientPercent = clientHeight > 0 && frameHeight > 0
+            ? clientHeight * 100.0 / frameHeight
+            : 100;
+
+        return lines
+            .Where(l => l.CenterY > field.CenterY + 2 && l.CenterY < clientPercent - 1)
+            .Where(l => LooksLikeAccountText(l.Text))
             .OrderBy(l => l.CenterY)
             .ToList();
+    }
 
-    /// <summary>这行像不像账号（邮箱 / 手机号 / 一串字母数字）。中文标签会被 CleanAccount 滤掉。</summary>
-    private static bool LooksLikeAccountText(string text)
+    /// <summary>
+    /// 这行像不像账号（邮箱 / 手机号 / 只显示前缀的账号）。
+    ///
+    /// 光看「含 @ 且够长」不行：忠告文字里有「自我保圹@ 防到上当。」，
+    /// CleanAccount 之后是「自我保圹@防到上当。适戏。...」——含 @、够长、全中。
+    /// 所以 @ 两边都得是真正像账号的东西：前面得有拉丁字母，后面也得有字母（域名）。
+    /// </summary>
+    public static bool LooksLikeAccountText(string text)
     {
         string s = CleanAccount(text);
+        if (s.Length is < 4 or > 48)
+        {
+            return false;
+        }
 
-        // 邮箱最稳；只显示前缀时（liaozicen041203）要有一定长度，别把「163」这种碎片当账号
-        return s.Length >= 4 && (s.Contains('@') || s.Length >= 6);
+        int at = s.IndexOf('@');
+        if (at >= 0)
+        {
+            string local = s[..at];
+            string domain = s[(at + 1)..];
+
+            return local.Length >= 3
+                   && local.Any(char.IsAsciiLetter)
+                   && domain.Length >= 3
+                   && domain.Any(char.IsAsciiLetter);
+        }
+
+        // 没 @ 的只可能是「历史里只显示前缀」那种行：纯字母数字，且字母得够多
+        return s.Length >= 6
+               && s.All(ch => char.IsAsciiLetterOrDigit(ch) || ch is '.' or '_' or '-')
+               && s.Count(char.IsAsciiLetter) >= 4;
     }
 
     /// <summary>

@@ -89,6 +89,9 @@ public sealed class AutoLoginService
         int captureFailures = 0;
         bool warnedAccount = false;
 
+        // 这一轮该点哪个窗口：平时是游戏主窗口，账号页那一屏换成悬浮窗
+        IntPtr clickTarget = hwnd;
+
         while (!ct.IsCancellationRequested)
         {
             if (DateTime.UtcNow > deadline)
@@ -96,7 +99,18 @@ public sealed class AutoLoginService
                 return "登录超时：画面一直没出现可以点的按钮，可能网络卡住，或停在没见过的界面";
             }
 
-            ScreenCapturer.Frame? frame = ScreenCapturer.Capture(hwnd, out string captureError);
+            // 账号页是主窗口之外的独立悬浮窗（直播/录屏里根本看不到它），所以每轮先找它：
+            // 找到就截它——四百多像素宽的小图，认字又快又准，也不受游戏画面裁切、缩放的影响。
+            IntPtr overlay = LoginOverlay.Find(hwnd);
+            clickTarget = overlay != IntPtr.Zero ? overlay : hwnd;
+
+            ScreenCapturer.Frame? frame = ScreenCapturer.Capture(clickTarget, out string captureError);
+            if (frame is null && clickTarget != hwnd)
+            {
+                clickTarget = hwnd;
+                frame = ScreenCapturer.Capture(hwnd, out captureError);
+            }
+
             if (frame is null)
             {
                 // 抓不到可信画面时，绝不能拿「认不出」当「已经进游戏了」——那样会假装成功
@@ -119,6 +133,24 @@ public sealed class AutoLoginService
 
             (Found found, List<TextLine> lines) = await RecognizeFoundAsync(frame.Value, accountKey, server)
                 .ConfigureAwait(true);
+
+            // 悬浮窗在、但认出来不是账号页（可能只是个还没画出来的空壳），换游戏窗口重认一次
+            if (clickTarget != hwnd && !found.IsAccountScreen)
+            {
+                ScreenCapturer.Frame? gameFrame = ScreenCapturer.Capture(hwnd, out _);
+                if (gameFrame is not null)
+                {
+                    (Found fallbackFound, List<TextLine> fallbackLines) =
+                        await RecognizeFoundAsync(gameFrame.Value, accountKey, server).ConfigureAwait(true);
+                    if (fallbackFound.Anything)
+                    {
+                        clickTarget = hwnd;
+                        frame = gameFrame;
+                        found = fallbackFound;
+                        lines = fallbackLines;
+                    }
+                }
+            }
 
             TextLine? roleButton = found.Role;
             TextLine? enterButton = found.Enter;
@@ -174,7 +206,7 @@ public sealed class AutoLoginService
                     sameClickTimes = 0;
                 }
 
-                await ClickLineAsync(hwnd, line, description, report, ct).ConfigureAwait(true);
+                await ClickLineAsync(clickTarget, line, description, report, ct).ConfigureAwait(true);
                 await Task.Delay(1300, ct).ConfigureAwait(true);
                 return true;
             }
@@ -185,7 +217,7 @@ public sealed class AutoLoginService
 
                 if (character.Length > 0)
                 {
-                    (bool ok, string? failReason) = await ClickRoleAsync(hwnd, character, stepTimeout, report, ct)
+                    (bool ok, string? failReason) = await ClickRoleAsync(clickTarget, character, stepTimeout, report, ct)
                         .ConfigureAwait(true);
                     if (!ok)
                     {
@@ -242,7 +274,7 @@ public sealed class AutoLoginService
                 }
 
                 // 按钮文字是图片字，OCR 认成「豆求腭又」这种，靠文字匹配不到，只能按位置点
-                TextLine? fallback = await FindAccountScreenButtonAsync(hwnd, ct).ConfigureAwait(true);
+                TextLine? fallback = await FindAccountScreenButtonAsync(clickTarget, ct).ConfigureAwait(true);
                 if (fallback is not null)
                 {
                     report($"按钮文字认不出来（识别为「{fallback.Text}」），按位置点这个主按钮。");
@@ -375,7 +407,7 @@ public sealed class AutoLoginService
     }
 
     /// <summary>在一批识别结果里找最像目标文字的那一行（设置界面「试一下」也用它）。</summary>
-    public static TextLine? FindBest(IReadOnlyList<TextLine> lines, string target)
+    public static TextLine? FindBest(IReadOnlyList<TextLine> lines, string target, double? threshold = null)
     {
         string normalizedTarget = OcrService.Normalize(target);
         if (normalizedTarget.Length == 0)
@@ -384,7 +416,7 @@ public sealed class AutoLoginService
         }
 
         // 短名字（两个字）容易被别的词蹭到，要求更严
-        double threshold = normalizedTarget.Length <= 2 ? 0.9 : 0.68;
+        double required = threshold ?? (normalizedTarget.Length <= 2 ? 0.9 : 0.68);
 
         // 要点的都是按钮或名字，都很短；底部公告 / 用户协议那种长句子偶尔会「凑巧凑够字」，
         // 实测「进入游戏」会被防沉迷公告那行命中（能凑出 3/4 个字），点下去就点到屏幕底部了
@@ -409,7 +441,7 @@ public sealed class AutoLoginService
             }
         }
 
-        return bestScore >= threshold ? best : null;
+        return bestScore >= required ? best : null;
     }
 
     /// <summary>
@@ -753,7 +785,10 @@ public sealed class AutoLoginService
     /// <summary>判定这一屏是什么，并说明下一步该点哪。</summary>
     public async Task<string> DescribeScreenAsync(IntPtr hwnd, string accountKey, string server)
     {
-        ScreenCapturer.Frame? frame = ScreenCapturer.Capture(hwnd, out string error);
+        IntPtr overlay = LoginOverlay.Find(hwnd);
+        IntPtr captureTarget = overlay != IntPtr.Zero ? overlay : hwnd;
+
+        ScreenCapturer.Frame? frame = ScreenCapturer.Capture(captureTarget, out string error);
         if (frame is null)
         {
             return "抓不到画面：" + error;
@@ -768,7 +803,8 @@ public sealed class AutoLoginService
             : "未知";
 
         var sb = new StringBuilder();
-        sb.AppendLine($"画面 {frame.Value.Width}×{frame.Value.Height}，认出 {lines.Count} 行");
+        sb.AppendLine(LoginOverlay.Describe(overlay));
+        sb.AppendLine($"截图来源 {(captureTarget == overlay && overlay != IntPtr.Zero ? "账号悬浮窗" : "游戏窗口")}，画面 {frame.Value.Width}×{frame.Value.Height}，认出 {lines.Count} 行");
         sb.AppendLine($"判定：{screen}");
         sb.AppendLine($"  点击登录：{Where(found.Role)}");
         sb.AppendLine($"  进入游戏：{Where(found.Enter)}");
@@ -788,7 +824,7 @@ public sealed class AutoLoginService
             FindBest(lines, "点击登录"),
             FindBest(lines, "进入游戏"),
             FindBest(lines, "登录游戏"),
-            FindBest(lines, "使用其他账号登录"),
+            FindBest(lines, "使用其他账号登录", 0.6),
             accountKey.Length > 0 ? FindBest(lines, accountKey) : null,
             server.Length > 0 ? FindBest(lines, server) : null,
             lines.Any(l => l.Text.Contains('@')));

@@ -1,3 +1,4 @@
+using System.IO;
 using Nightforge.Models;
 
 namespace Nightforge.Services;
@@ -13,6 +14,12 @@ public sealed class AutoLoginService
 {
     /// <summary>两次认字之间的间隔。一轮「抓图 + 识别」大约 0.2 秒，再加这点间隔不至于把 CPU 占满。</summary>
     private const int PollIntervalMs = 450;
+
+    /// <summary>
+    /// 连续多久认不出任何登录字样，就认定已经进了游戏。
+    /// 点完按钮后要加载、切场景，中途画面是空的，所以这个值要够宽（20 秒）。
+    /// </summary>
+    private const double UnknownScreenToleranceSeconds = 20;
 
     private readonly LogService _log;
 
@@ -77,7 +84,8 @@ public sealed class AutoLoginService
         string lastScreen = "";
         string lastClickKey = "";
         int sameClickTimes = 0;
-        int silentRounds = 0;
+        DateTime? unknownSince = null;
+        int captureFailures = 0;
         bool warnedAccount = false;
 
         while (!ct.IsCancellationRequested)
@@ -87,14 +95,38 @@ public sealed class AutoLoginService
                 return "登录超时：画面一直没出现可以点的按钮，可能网络卡住，或停在没见过的界面";
             }
 
-            ScreenCapturer.Frame? frame = ScreenCapturer.Capture(hwnd);
+            ScreenCapturer.Frame? frame = ScreenCapturer.Capture(hwnd, out string captureError);
             if (frame is null)
             {
+                // 抓不到可信画面时，绝不能拿「认不出」当「已经进游戏了」——那样会假装成功
+                captureFailures++;
+                if (captureFailures == 1)
+                {
+                    report($"抓不到游戏画面：{captureError}");
+                }
+
+                if (captureFailures >= 8)
+                {
+                    return $"抓不到游戏画面（{captureError}）。请把游戏窗口切到最前面、别被别的窗口挡住，再重试。";
+                }
+
                 await Task.Delay(PollIntervalMs, ct).ConfigureAwait(true);
                 continue;
             }
 
+            captureFailures = 0;
+
             List<TextLine> lines = await OcrService.RecognizeAsync(frame.Value).ConfigureAwait(true);
+
+            // 快通道一个登录相关字样都没认出来时，换加强通道（放大 2 倍 + 反色）再认一次。
+            // 深底白字的按钮经常只有加强通道能认出来，直接判「已进游戏」会误报成功。
+            if (!lines.Any(l => l.Text.Contains('@')
+                                || Similar(l.Text, "进入游戏") >= 0.5
+                                || Similar(l.Text, "点击登录") >= 0.5
+                                || Similar(l.Text, "登录游戏") >= 0.5))
+            {
+                lines = await OcrService.RecognizeAsync(frame.Value, thorough: true).ConfigureAwait(true);
+            }
 
             TextLine? roleButton = FindBest(lines, "点击登录");
             TextLine? enterButton = FindBest(lines, "进入游戏");
@@ -103,8 +135,32 @@ public sealed class AutoLoginService
             TextLine? accountLine = accountKey.Length > 0 ? FindBest(lines, accountKey) : null;
             TextLine? serverLine = server.Length > 0 ? FindBest(lines, server) : null;
 
+            // 账号页一定有带 @ 的邮箱；「使用其他账号登录」也只在那一屏出现
+            bool looksLikeAccountScreen = accountLine is not null
+                                          || switchAccount is not null
+                                          || lines.Any(l => l.Text.Contains('@'));
+
+            // 账号页的「进入游戏」是白字深底，快通道经常认不出来（只认得出上面的邮箱）。
+            // 既然已经确定停在这一屏，就换加强通道把它找准——总比按位置瞎点稳妥。
+            if (looksLikeAccountScreen && enterButton is null)
+            {
+                List<TextLine> strong = await OcrService.RecognizeAsync(frame.Value, thorough: true).ConfigureAwait(true);
+                TextLine? strongEnter = FindBest(strong, "进入游戏");
+                if (strongEnter is not null)
+                {
+                    lines = strong;
+                    roleButton = FindBest(lines, "点击登录");
+                    enterButton = strongEnter;
+                    serverButton = FindBest(lines, "登录游戏");
+                    switchAccount = FindBest(lines, "使用其他账号登录");
+                    accountLine = accountKey.Length > 0 ? FindBest(lines, accountKey) : null;
+                    serverLine = server.Length > 0 ? FindBest(lines, server) : null;
+                }
+            }
+
             // 账号页一定有个带 @ 的邮箱，哪怕按钮字是图片、认不出来也能认出这一屏
-            bool onAccountScreen = accountLine is not null
+            bool onAccountScreen = looksLikeAccountScreen
+                                   || accountLine is not null
                                    || switchAccount is not null
                                    || lines.Any(l => l.Text.Contains('@'));
 
@@ -117,6 +173,17 @@ public sealed class AutoLoginService
             {
                 report($"当前界面：{screen}");
                 lastScreen = screen;
+            }
+
+            // 「这一屏认不出」要能持续一段时间才算真的不在登录流程里。
+            // 点完按钮后游戏会加载好几秒，中途画面是空的，按次数数会太早收工。
+            if (screen == "未知")
+            {
+                unknownSince ??= DateTime.UtcNow;
+            }
+            else
+            {
+                unknownSince = null;
             }
 
             // 同一屏同一个按钮连点三次画面都没变，说明这一下点不动，别再空转
@@ -145,7 +212,6 @@ public sealed class AutoLoginService
             // 1) 角色列表：一屏可能有好几个「点击登录」，必须按角色名就近配对，绝不点别人的
             if (roleButton is not null)
             {
-                silentRounds = 0;
 
                 if (character.Length > 0)
                 {
@@ -172,7 +238,6 @@ public sealed class AutoLoginService
             // 2) 服务器页：角色列表要点服务器名字才会出来，所以优先点名字
             if (serverLine is not null && !onAccountScreen)
             {
-                silentRounds = 0;
                 if (!await ClickOnceAsync(serverLine, $"服务器「{server}」", "server").ConfigureAwait(true))
                 {
                     return $"点了好几次「{server}」都没有反应";
@@ -184,7 +249,6 @@ public sealed class AutoLoginService
             // 3) 账号页：主按钮写的是「进入游戏」，字认不出来时按位置兜底
             if (enterButton is not null || onAccountScreen)
             {
-                silentRounds = 0;
 
                 if (accountKey.Length > 0 && !warnedAccount)
                 {
@@ -224,7 +288,6 @@ public sealed class AutoLoginService
             // 4) 兜底：服务器页的「登录游戏」（没填服务器名时才会走到这里）
             if (serverButton is not null)
             {
-                silentRounds = 0;
                 if (!await ClickOnceAsync(serverButton, "登录游戏", "server-enter").ConfigureAwait(true))
                 {
                     return "「登录游戏」点了好几次都没有反应";
@@ -234,10 +297,22 @@ public sealed class AutoLoginService
             }
 
             // 5) 画面上没有任何登录相关字样：多半已经进游戏了
-            silentRounds++;
-            if (silentRounds >= 4)
+            double unknownSeconds = unknownSince is null
+                ? 0
+                : (DateTime.UtcNow - unknownSince.Value).TotalSeconds;
+
+            if (unknownSeconds >= UnknownScreenToleranceSeconds)
             {
-                report("画面上已经没有登录按钮，判断已经进到游戏里了。");
+                // 把这一屏存下来，万一判断错了（其实还停在某个没见过的界面），有图可查
+                string dump = Path.Combine(Path.GetTempPath(), "nightforge_unknown.bmp");
+                string? saved = ScreenCapturer.SaveBmp(frame.Value, dump);
+
+                report($"连续 {unknownSeconds:F0} 秒没找到任何登录按钮，判断已经进到游戏里了。");
+                if (saved is not null)
+                {
+                    report($"这一屏的画面已存到 {saved}，如果其实没进游戏，把它发我。");
+                }
+
                 return null;
             }
 
@@ -648,65 +723,10 @@ public sealed class AutoLoginService
         NativeMethods.mouse_event(NativeMethods.MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
     }
 
-    /// <summary>
-    /// 抢前台。Windows 只允许前台进程自己调用 SetForegroundWindow，
-    /// 所以先用 AttachThreadInput 把输入队列挂到当前前台线程，还不够就补一次模拟 ALT 键，
-    /// 让系统认为「用户刚刚有输入」从而放行。三招轮流试，最后返回是否真的抢到了。
-    /// </summary>
-    public static bool ForceForeground(IntPtr hwnd)
-    {
-        if (NativeMethods.GetForegroundWindow() == hwnd)
-        {
-            return true;
-        }
+    /// <summary>两段文字像不像（忽略空格标点，0～1）。</summary>
+    private static double Similar(string text, string target)
+        => OcrService.Similarity(OcrService.Normalize(text), OcrService.Normalize(target));
 
-        if (NativeMethods.IsIconic(hwnd))
-        {
-            NativeMethods.ShowWindow(hwnd, NativeMethods.SW_RESTORE);
-            Thread.Sleep(120);
-        }
-
-        for (int attempt = 0; attempt < 3; attempt++)
-        {
-            IntPtr foreground = NativeMethods.GetForegroundWindow();
-            uint currentThread = NativeMethods.GetCurrentThreadId();
-            uint foregroundThread = foreground == IntPtr.Zero
-                ? 0
-                : NativeMethods.GetWindowThreadProcessId(foreground, out _);
-
-            bool attached = false;
-            if (foregroundThread != 0 && foregroundThread != currentThread)
-            {
-                attached = NativeMethods.AttachThreadInput(foregroundThread, currentThread, true);
-            }
-
-            try
-            {
-                NativeMethods.BringWindowToTop(hwnd);
-                if (!NativeMethods.SetForegroundWindow(hwnd) || NativeMethods.GetForegroundWindow() != hwnd)
-                {
-                    // 兜底：系统把「模拟 ALT」当作用户输入，随后的 SetForegroundWindow 就不再被拒
-                    NativeMethods.keybd_event(NativeMethods.VK_MENU, 0, 0, UIntPtr.Zero);
-                    NativeMethods.keybd_event(NativeMethods.VK_MENU, 0, NativeMethods.KEYEVENTF_KEYUP, UIntPtr.Zero);
-                    NativeMethods.SetForegroundWindow(hwnd);
-                }
-            }
-            finally
-            {
-                if (attached)
-                {
-                    NativeMethods.AttachThreadInput(foregroundThread, currentThread, false);
-                }
-            }
-
-            if (NativeMethods.GetForegroundWindow() == hwnd)
-            {
-                return true;
-            }
-
-            Thread.Sleep(120);
-        }
-
-        return NativeMethods.GetForegroundWindow() == hwnd;
-    }
+    /// <summary>抢前台，实现见 WindowService（抓图和点击共用同一套逻辑）。</summary>
+    public static bool ForceForeground(IntPtr hwnd) => WindowFocus.Force(hwnd);
 }

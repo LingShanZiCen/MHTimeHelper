@@ -1,3 +1,4 @@
+using System.IO;
 using System.Runtime.InteropServices;
 
 namespace Nightforge.Services;
@@ -13,15 +14,29 @@ public static class ScreenCapturer
     /// <summary>一帧画面：宽、高、BGRA 排列的像素（每像素 4 字节，第 0 行在最上面）。</summary>
     public readonly record struct Frame(int Width, int Height, byte[] Pixels);
 
-    public static Frame? Capture(IntPtr hwnd)
+    public static Frame? Capture(IntPtr hwnd) => Capture(hwnd, out _);
+
+    /// <summary>
+    /// 抓图，并且保证这一帧确实是这个窗口自己的画面。
+    ///
+    /// 游戏的 DirectX 画面 PrintWindow 抓出来是全黑，只能退回「从屏幕拷」；
+    /// 而屏幕拷贝只忠实于屏幕——游戏窗口要是被别的窗口盖住，拷回来的就是那个窗口，
+    /// 于是认字会认出一堆无关内容、判不清当前在哪一屏。所以拷之前必须确认窗口真的在最前面，
+    /// 抢不到就返回 null 并说明原因，让上层报错，而不是拿一张假画面去猜。
+    /// </summary>
+    public static Frame? Capture(IntPtr hwnd, out string failureReason)
     {
+        failureReason = string.Empty;
+
         if (!NativeMethods.IsWindow(hwnd))
         {
+            failureReason = "窗口已经不存在";
             return null;
         }
 
         if (!NativeMethods.GetClientRect(hwnd, out NativeMethods.RECT rc))
         {
+            failureReason = "读不到窗口客户区（窗口可能已最小化）";
             return null;
         }
 
@@ -29,22 +44,114 @@ public static class ScreenCapturer
         int height = rc.Bottom - rc.Top;
         if (width <= 0 || height <= 0 || width > 8000 || height > 8000)
         {
+            failureReason = $"窗口客户区尺寸异常（{width}×{height}），可能已最小化";
             return null;
         }
 
-        Frame? captured = CaptureWithPrintWindow(hwnd, width, height);
-        if (captured is not null && !IsMostlyBlank(captured.Value))
+        // 第一条路：PrintWindow 不依赖前台，能抓到被遮挡的窗口（DirectX 独占渲染时多为全黑）
+        Frame? printed = CaptureWithPrintWindow(hwnd, width, height);
+        if (printed is not null && !IsMostlyBlank(printed.Value))
         {
-            return captured;
+            return printed;
         }
 
-        Frame? fromScreen = CaptureFromScreen(hwnd, width, height);
-        if (fromScreen is not null && !IsMostlyBlank(fromScreen.Value))
+        // 第二条路：从屏幕拷，前提是窗口真的在最前面
+        for (int attempt = 0; attempt < 2; attempt++)
         {
+            if (!WindowFocus.Force(hwnd))
+            {
+                failureReason = "游戏窗口抢不到前台（被别的窗口挡住，或焦点被切走了）";
+                continue;
+            }
+
+            Thread.Sleep(140);
+
+            if (NativeMethods.GetForegroundWindow() != hwnd)
+            {
+                failureReason = "游戏窗口刚抢到前台又被切走";
+                continue;
+            }
+
+            Frame? fromScreen = CaptureFromScreen(hwnd, width, height);
+            if (fromScreen is null || IsMostlyBlank(fromScreen.Value))
+            {
+                failureReason = "屏幕拷贝拿不到画面（窗口最小化或画面全黑）";
+                continue;
+            }
+
+            // 拷的这一刻窗口被切走的话，拿到的可能是别的程序的画面，宁可不认
+            if (NativeMethods.GetForegroundWindow() != hwnd)
+            {
+                failureReason = "抓图过程中游戏窗口被切走，画面不可信";
+                continue;
+            }
+
+            failureReason = string.Empty;
             return fromScreen;
         }
 
-        return captured ?? fromScreen;
+        return null;
+    }
+
+    /// <summary>
+    /// 把一帧存成 24 位 BMP。只用于排查「这一屏认不出来」，不参与正常登录流程。
+    /// </summary>
+    public static string? SaveBmp(Frame frame, string path)
+    {
+        try
+        {
+            int rowBytes = frame.Width * 3;
+            int padding = (4 - rowBytes % 4) % 4;
+            int rowSize = rowBytes + padding;
+            int dataSize = rowSize * frame.Height;
+
+            using var stream = new FileStream(path, FileMode.Create, FileAccess.Write);
+            using var writer = new BinaryWriter(stream);
+
+            writer.Write((byte)'B');
+            writer.Write((byte)'M');
+            writer.Write(14 + 40 + dataSize);
+            writer.Write(0);
+            writer.Write(54);
+            writer.Write(40);
+            writer.Write(frame.Width);
+            writer.Write(frame.Height);
+            writer.Write((short)1);
+            writer.Write((short)24);
+            writer.Write(0);
+            writer.Write(dataSize);
+            writer.Write(2835);
+            writer.Write(2835);
+            writer.Write(0);
+            writer.Write(0);
+
+            byte[] pad = new byte[padding];
+            byte[] row = new byte[rowBytes];
+
+            // BMP 是自下而上存的，而 Pixels 第 0 行在最上面，所以倒着写
+            for (int y = frame.Height - 1; y >= 0; y--)
+            {
+                int offset = y * frame.Width * 4;
+                for (int x = 0; x < frame.Width; x++)
+                {
+                    row[x * 3] = frame.Pixels[offset + x * 4];
+                    row[x * 3 + 1] = frame.Pixels[offset + x * 4 + 1];
+                    row[x * 3 + 2] = frame.Pixels[offset + x * 4 + 2];
+                }
+
+                writer.Write(row);
+                if (padding > 0)
+                {
+                    writer.Write(pad);
+                }
+            }
+
+            return path;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static Frame? CaptureWithPrintWindow(IntPtr hwnd, int width, int height)

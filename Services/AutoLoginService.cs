@@ -13,6 +13,10 @@ namespace Nightforge.Services;
 /// </summary>
 public sealed class AutoLoginService
 {
+    /// <summary>游戏内界面的典型按钮。认出几个就说明不是在登录流程里了。</summary>
+    private static readonly string[] GameUiKeywords =
+        ["包裹", "师门", "队伍", "好友", "骑乘", "技能", "商城", "排行", "挂机"];
+
     /// <summary>两次认字之间的间隔。一轮「抓图 + 识别」大约 0.2 秒，再加这点间隔不至于把 CPU 占满。</summary>
     private const int PollIntervalMs = 450;
 
@@ -87,10 +91,12 @@ public sealed class AutoLoginService
         int sameClickTimes = 0;
         DateTime? unknownSince = null;
         int captureFailures = 0;
-        bool warnedAccount = false;
 
         // 这一轮该点哪个窗口：平时是游戏主窗口，账号页那一屏换成悬浮窗
         IntPtr clickTarget = hwnd;
+
+        // 点过「进入游戏」的时刻。刚点完的几秒里悬浮窗还没关，不能接着重复点。
+        DateTime? enterClickedAt = null;
 
         while (!ct.IsCancellationRequested)
         {
@@ -99,15 +105,25 @@ public sealed class AutoLoginService
                 return "登录超时：画面一直没出现可以点的按钮，可能网络卡住，或停在没见过的界面";
             }
 
-            // 账号页是主窗口之外的独立悬浮窗（直播/录屏里根本看不到它），所以每轮先找它：
-            // 找到就截它——四百多像素宽的小图，认字又快又准，也不受游戏画面裁切、缩放的影响。
+            // 账号页是主窗口之外的独立悬浮窗（直播 / 录屏里根本看不到它）。
+            // 有它就只认它：游戏画面里永远不会出现「邮箱 + 进入游戏」，
+            // 拿游戏画面的文字去判账号页，只会把服务器页误判成账号页、然后乱点。
             IntPtr overlay = LoginOverlay.Find(hwnd);
-            clickTarget = overlay != IntPtr.Zero ? overlay : hwnd;
+            bool framedFromOverlay = false;
+            ScreenCapturer.Frame? frame = null;
 
-            ScreenCapturer.Frame? frame = ScreenCapturer.Capture(clickTarget, out string captureError);
-            if (frame is null && clickTarget != hwnd)
+            if (overlay != IntPtr.Zero)
             {
-                clickTarget = hwnd;
+                frame = ScreenCapturer.Capture(overlay, out _);
+                if (frame is not null)
+                {
+                    framedFromOverlay = true;
+                }
+            }
+
+            string captureError = "";
+            if (frame is null)
+            {
                 frame = ScreenCapturer.Capture(hwnd, out captureError);
             }
 
@@ -130,45 +146,23 @@ public sealed class AutoLoginService
             }
 
             captureFailures = 0;
+            clickTarget = framedFromOverlay ? overlay : hwnd;
 
             (Found found, List<TextLine> lines) = await RecognizeFoundAsync(frame.Value, accountKey, server)
                 .ConfigureAwait(true);
 
-            // 悬浮窗在、但认出来不是账号页（可能只是个还没画出来的空壳），换游戏窗口重认一次
-            if (clickTarget != hwnd && !found.IsAccountScreen)
-            {
-                ScreenCapturer.Frame? gameFrame = ScreenCapturer.Capture(hwnd, out _);
-                if (gameFrame is not null)
-                {
-                    (Found fallbackFound, List<TextLine> fallbackLines) =
-                        await RecognizeFoundAsync(gameFrame.Value, accountKey, server).ConfigureAwait(true);
-                    if (fallbackFound.Anything)
-                    {
-                        clickTarget = hwnd;
-                        frame = gameFrame;
-                        found = fallbackFound;
-                        lines = fallbackLines;
-                    }
-                }
-            }
+            // 关键：账号页的判据只能来自悬浮窗。游戏画面里出现「账号」两个字、出现 @ 都不算。
+            bool onAccountScreen = framedFromOverlay && found.IsAccountScreen;
 
             TextLine? roleButton = found.Role;
             TextLine? enterButton = found.Enter;
             TextLine? serverButton = found.ServerButton;
-            TextLine? switchAccount = found.SwitchAccount;
-            TextLine? accountLine = found.Account;
             TextLine? serverLine = found.Server;
-            bool looksLikeAccountScreen = found.IsAccountScreen;
 
-            // 账号页一定有个带 @ 的邮箱，哪怕按钮字是图片、认不出来也能认出这一屏
-            bool onAccountScreen = looksLikeAccountScreen
-                                   || accountLine is not null
-                                   || switchAccount is not null
-                                   || lines.Any(l => l.Text.Contains('@'));
-
-            string screen = roleButton is not null ? "角色页"
-                : onAccountScreen ? "账号页"
-                : serverButton is not null ? "服务器页"
+            string screen = onAccountScreen ? "账号页"
+                : roleButton is not null ? "角色页"
+                : serverLine is not null || serverButton is not null ? "服务器页"
+                : framedFromOverlay ? "登录窗加载中"
                 : "未知";
 
             if (screen != lastScreen)
@@ -211,10 +205,50 @@ public sealed class AutoLoginService
                 return true;
             }
 
-            // 1) 角色列表：一屏可能有好几个「点击登录」，必须按角色名就近配对，绝不点别人的
+            // 1) 账号页（只在悬浮窗上判）：点「进入游戏」
+            if (onAccountScreen)
+            {
+                // 刚点过就等它关窗，别对着还没消失的按钮连点
+                if (enterClickedAt is not null
+                    && (DateTime.UtcNow - enterClickedAt.Value).TotalSeconds < 8)
+                {
+                    await Task.Delay(PollIntervalMs, ct).ConfigureAwait(true);
+                    continue;
+                }
+
+                if (enterButton is not null)
+                {
+                    if (!await ClickOnceAsync(enterButton, "进入游戏", "enter").ConfigureAwait(true))
+                    {
+                        return "「进入游戏」点了好几次都没有反应";
+                    }
+
+                    enterClickedAt = DateTime.UtcNow;
+                    continue;
+                }
+
+                // 按钮是图片字，认成「豆求腭〖」这种；位置兜底必须基于当前这一帧，
+                // 不能重新抓图——重抓可能抓到别的窗口，坐标就全错了。
+                TextLine? fallback = FindBottomCenteredButton(lines);
+                if (fallback is not null)
+                {
+                    report($"按钮文字认不出来（识别为「{fallback.Text}」），按位置点这个主按钮。");
+                    if (!await ClickOnceAsync(fallback, "主按钮（按位置）", "enter-fallback").ConfigureAwait(true))
+                    {
+                        return "主按钮点了好几次都没有反应";
+                    }
+
+                    enterClickedAt = DateTime.UtcNow;
+                    continue;
+                }
+
+                await Task.Delay(PollIntervalMs, ct).ConfigureAwait(true);
+                continue;
+            }
+
+            // 2) 角色列表：一屏可能有好几个「点击登录」，必须按角色名就近配对，绝不点别人的
             if (roleButton is not null)
             {
-
                 if (character.Length > 0)
                 {
                     (bool ok, string? failReason) = await ClickRoleAsync(clickTarget, character, stepTimeout, report, ct)
@@ -237,8 +271,9 @@ public sealed class AutoLoginService
                 continue;
             }
 
-            // 2) 服务器页：角色列表要点服务器名字才会出来，所以优先点名字
-            if (serverLine is not null && !onAccountScreen)
+            // 3) 服务器页：角色列表要点服务器名字才会展开，所以优先点名字。
+            //    点下面的「登录游戏」会直接进上次玩过的角色，跳过选角色——那正是之前进错号的原因。
+            if (serverLine is not null)
             {
                 if (!await ClickOnceAsync(serverLine, $"服务器「{server}」", "server").ConfigureAwait(true))
                 {
@@ -248,46 +283,7 @@ public sealed class AutoLoginService
                 continue;
             }
 
-            // 3) 账号页：主按钮写的是「进入游戏」，字认不出来时按位置兜底
-            if (enterButton is not null || onAccountScreen)
-            {
-
-                if (accountKey.Length > 0 && !warnedAccount)
-                {
-                    TextLine? emailLine = lines.FirstOrDefault(l => l.Text.Contains('@'));
-                    if (emailLine is not null
-                        && OcrService.Similarity(OcrService.Normalize(emailLine.Text), OcrService.Normalize(accountKey)) < 0.5)
-                    {
-                        warnedAccount = true;
-                        report($"登录框里的账号不是「{accountKey}」（画面显示「{emailLine.Text}」），如需换号请手动切换。");
-                    }
-                }
-
-                if (enterButton is not null)
-                {
-                    if (!await ClickOnceAsync(enterButton, "进入游戏", "enter").ConfigureAwait(true))
-                    {
-                        return "「进入游戏」点了好几次都没有反应";
-                    }
-
-                    continue;
-                }
-
-                // 按钮文字是图片字，OCR 认成「豆求腭又」这种，靠文字匹配不到，只能按位置点
-                TextLine? fallback = await FindAccountScreenButtonAsync(clickTarget, ct).ConfigureAwait(true);
-                if (fallback is not null)
-                {
-                    report($"按钮文字认不出来（识别为「{fallback.Text}」），按位置点这个主按钮。");
-                    if (!await ClickOnceAsync(fallback, "主按钮（按位置）", "enter-fallback").ConfigureAwait(true))
-                    {
-                        return "主按钮点了好几次都没有反应";
-                    }
-
-                    continue;
-                }
-            }
-
-            // 4) 兜底：服务器页的「登录游戏」（没填服务器名时才会走到这里）
+            // 4) 只有「登录游戏」、没有服务器名（还没选过服务器的启动页）
             if (serverButton is not null)
             {
                 if (!await ClickOnceAsync(serverButton, "登录游戏", "server-enter").ConfigureAwait(true))
@@ -298,12 +294,30 @@ public sealed class AutoLoginService
                 continue;
             }
 
-            // 5) 画面上没有任何登录相关字样：多半已经进游戏了
+            // 5) 认不出任何登录字样：多半已经进游戏了。这一屏绝不点击。
             double unknownSeconds = unknownSince is null
                 ? 0
                 : (DateTime.UtcNow - unknownSince.Value).TotalSeconds;
 
-            if (unknownSeconds >= UnknownScreenToleranceSeconds)
+            // 已经在游戏里：认出一堆游戏内按钮，却一个登录字样也没有。
+            // 这时不该干等 20 秒再宣布「已进游戏」，直接把话说清楚。
+            if (unknownSeconds >= 2)
+            {
+                int gameUiHits = GameUiKeywords.Count(
+                    keyword => lines.Any(l => OcrService.Normalize(l.Text).Contains(keyword, StringComparison.Ordinal)));
+
+                if (gameUiHits >= 3)
+                {
+                    report("画面里已经是游戏内的界面（认出包裹 / 任务 / 队伍这些按钮），这个账号当前已登录，不需要再登录。");
+                    report("要换角色的话，先在游戏里退出到登录界面，再点开始登录。");
+                    return null;
+                }
+            }
+
+            // 已经从账号页点过「进入游戏」，说明流程确实走完了，进游戏就快一点收工；
+            // 一开始就认不出（游戏还没起来）才用长容差，免得把慢启动误判成失败。
+            double tolerance = enterClickedAt is null ? UnknownScreenToleranceSeconds : 8;
+            if (unknownSeconds >= tolerance)
             {
                 // 把这一屏存下来，万一判断错了（其实还停在某个没见过的界面），有图可查
                 string dump = Path.Combine(Path.GetTempPath(), "nightforge_unknown.bmp");
@@ -797,9 +811,12 @@ public sealed class AutoLoginService
         (Found found, List<TextLine> lines) = await RecognizeFoundAsync(frame.Value, accountKey, server)
             .ConfigureAwait(true);
 
-        string screen = found.Role is not null ? "角色页"
-            : found.IsAccountScreen ? "账号页"
-            : found.ServerButton is not null ? "服务器页"
+        // 与主流程同一套口径：账号页只能来自悬浮窗帧
+        bool fromOverlay = overlay != IntPtr.Zero && captureTarget == overlay;
+        string screen = fromOverlay && found.IsAccountScreen ? "账号页"
+            : found.Role is not null ? "角色页"
+            : found.ServerButton is not null || found.Server is not null ? "服务器页"
+            : fromOverlay ? "登录窗加载中"
             : "未知";
 
         var sb = new StringBuilder();

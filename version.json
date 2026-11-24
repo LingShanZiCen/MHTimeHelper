@@ -1,22 +1,26 @@
 {
-  "version": "1.0.4",
+  "version": "1.0.5",
   "url": "https://github.com/LingShanZiCen/MHTimeHelper/releases",
-  "exeUrl": "https://gh-proxy.com/https://github.com/LingShanZiCen/MHTimeHelper/releases/download/v1.0.4/Nightforge.exe",
+  "exeUrl": "https://gh-proxy.com/https://github.com/LingShanZiCen/MHTimeHelper/releases/download/v1.0.5/Nightforge.exe",
   "exeUrls": [
-    "https://gh-proxy.com/https://github.com/LingShanZiCen/MHTimeHelper/releases/download/v1.0.4/Nightforge.exe",
-    "https://ghfast.top/https://github.com/LingShanZiCen/MHTimeHelper/releases/download/v1.0.4/Nightforge.exe",
-    "https://ghproxy.net/https://github.com/LingShanZiCen/MHTimeHelper/releases/download/v1.0.4/Nightforge.exe",
-    "https://github.com/LingShanZiCen/MHTimeHelper/releases/download/v1.0.4/Nightforge.exe"
+    "https://gh-proxy.com/https://github.com/LingShanZiCen/MHTimeHelper/releases/download/v1.0.5/Nightforge.exe",
+    "https://ghfast.top/https://github.com/LingShanZiCen/MHTimeHelper/releases/download/v1.0.5/Nightforge.exe",
+    "https://ghproxy.net/https://github.com/LingShanZiCen/MHTimeHelper/releases/download/v1.0.5/Nightforge.exe",
+    "https://github.com/LingShanZiCen/MHTimeHelper/releases/download/v1.0.5/Nightforge.exe"
   ],
-  "sha256": "ccd6ca1f33c0c483ac85fd67c266beca0f03f0fd87835baa7324e0ff50518ce7",
-  "size": 70486829,
-  "notes": "幻夜工坊 1.0.4：修好了「发现新版本却下不动」的自动更新问题，下载改走多条加速线路并支持断点续传",
+  "sha256": "5ced8f49d4f598d7905e3687d767a77b721f7902e1e54123b5a052ea737e1d7e",
+  "size": 70498627,
+  "notes": "幻夜工坊 1.0.5：新增窗口序号与直达热键、一键重排、声音管理、掉线补开、快速导航；移除自动登录",
   "changes": [
-    "修复：网络连不上 GitHub 下载页时「已经发现新版本，却一直卡着下不动」——现在会自动切换多条加速线路，一条不通换下一条",
-    "优化：下载改为断点续传，中断后从上次的位置继续，不再从 0 重新下 70 MB",
-    "优化：单条线路失败会先在原地重试一次再换线路，网络临时抖动不再导致整次更新作废",
-    "优化：下载超时判定改为「连续一段时间收不到数据」才算失败，慢速网络也能下完（此前有 10 分钟总时长硬限制）",
-    "新增：更新过程写入程序目录下的 update.log，检查、下载、替换每一步都有记录，出问题可直接查看原因",
-    "新增：版本清单支持配置多条下载地址（exeUrls），镜像与官方直链可同时列出，客户端自动择优"
+    "新增：窗口标题自动加 ①~⑤ 序号（按屏幕位置排，① 在左上），按 Ctrl+Alt+1~5 直接跳到对应窗口，五开不用再对着五个一样的窗口猜",
+    "新增：「重新排列」按钮与热键——不关游戏也能把已开的窗口按布局摆回原位，挂机途中游戏改了分辨率或手滑拖乱了都用它",
+    "新增：声音管理——一键让所有窗口静音、或只留某一个窗口有声，只动游戏自己的声音，浏览器和音乐播放器不受影响",
+    "新增：掉线/闪退自动补开——窗口数量少于「启动数量」时自动补一个并重新排列（需在「多开辅助」里勾选）",
+    "新增：设置区顶部加了「快速导航」，点一下直接跳到对应那一节、当前所在的一节会亮着；「同步器」挪到了最下面，日常用不到的不再占前排",
+    "更新：移除「自动登录」功能——识别游戏界面的那套东西太依赖客户端版本，维护不动了，主界面只保留启动、排列、退出这些最常用的操作",
+    "修复：自动适配时窗口标题栏会被顶到屏幕外（只开一个 16:9 窗口时必然出现），最小化/关闭按钮点不到、窗口也拖不回来——现在排列前会先给标题栏和边框预留空间",
+    "修复：排列完成后增加兜底，任何窗口只要超出工作区就整体挪回来（只挪不缩，尺寸和比例都不受影响）",
+    "修复：升级后残留的 Nightforge_old.exe（约 67 MB）以前只在特定方式启动时才清理，现在每次启动都会顺手清掉",
+    "修复：自动下载全部线路都失败时界面上毫无反应，现在会弹窗说明原因，可直接打开下载页，也可让它按断点继续重试"
   ]
 }

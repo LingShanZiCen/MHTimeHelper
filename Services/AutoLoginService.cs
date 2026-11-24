@@ -123,6 +123,10 @@ public sealed class AutoLoginService
         bool switchTried = false;
         bool warnedAfterSwitch = false;
 
+        // 服务器搜索也只做一次：目标服不在列表里时用左上角搜索框搜出来
+        bool serverSearched = false;
+        TextLine? searchBoxAt = null;
+
         // 点击失败的确切原因（比如游戏卡死）。上层直接用它报错，别再说「没有反应」这种废话。
         string? fatalReason = null;
 
@@ -190,10 +194,20 @@ public sealed class AutoLoginService
             TextLine? serverButton = found.ServerButton;
             TextLine? serverLine = found.Server;
 
+            // 搜索框里也会显示服务器名（搜完之后就一直在框里），那行不是服务器按钮：
+            // 点它只会把光标点回输入框。所以与搜索框同一高度的行一律不算。
+            TextLine? searchBox = found.Search ?? searchBoxAt;
+            if (serverLine is not null && searchBox is not null
+                && Math.Abs(serverLine.CenterY - searchBox.CenterY) < 3)
+            {
+                serverLine = null;
+            }
+
             string screen = onLoginForm ? "登录表单"
                 : onAccountScreen ? "账号页"
                 : roleButton is not null ? "角色页"
                 : serverLine is not null || serverButton is not null ? "服务器页"
+                : found.IsServerList ? "服务器列表"
                 : framedFromOverlay ? "登录窗加载中"
                 : "未知";
 
@@ -368,6 +382,23 @@ public sealed class AutoLoginService
                 }
 
                 await Task.Delay(1200, ct).ConfigureAwait(true);
+                continue;
+            }
+
+            // 2.5) 服务器列表页上没看到目标服：这一屏默认只列当前分区的几个服，
+            //      目标服在别的区就很正常。左上角有搜索框，搜出来再点。
+            if (!serverSearched && found.Search is not null && serverLine is null && server.Length > 0)
+            {
+                serverSearched = true;
+                searchBoxAt = found.Search;
+
+                (bool searched, string? searchReason) =
+                    await SearchServerAsync(clickTarget, server, found.Search, report, ct).ConfigureAwait(true);
+                if (!searched)
+                {
+                    return searchReason;
+                }
+
                 continue;
             }
 
@@ -807,6 +838,139 @@ public sealed class AutoLoginService
 
         return (false, $"没找到角色「{character}」。{hint}"
                        + "可以把角色名填成卡片上显示的名字；如果这一屏还没有角色卡片，说明还没进到选角色界面。");
+    }
+
+    /// <summary>
+    /// 服务器列表页上搜出目标服务器。
+    ///
+    /// 这一屏默认只列当前分区的几个服（实测「红颜知己」不在里面），
+    /// 但左上角有个搜索框：点进去、清空、输名字，右侧就只剩搜出来的那一个。
+    /// 中文靠 SendInput + KEYEVENTF_UNICODE 直接打字，不经过输入法，所以不用管当前是什么输入法状态。
+    /// </summary>
+    private async Task<(bool Ok, string? Reason)> SearchServerAsync(
+        IntPtr window,
+        string server,
+        TextLine searchBox,
+        Action<string> report,
+        CancellationToken ct)
+    {
+        if (!TryCaptureArea(window, out LoginArea area, out ScreenCapturer.Frame? frame) || frame is null)
+        {
+            return (false, "服务器列表页抓不到画面，先在游戏窗口上点一下再重试");
+        }
+
+        report($"这一屏没有「{server}」，用左上角的搜索框搜一下");
+
+        await ClickPointAsync(area, searchBox, "服务器搜索框", report, ct).ConfigureAwait(true);
+        await Task.Delay(450, ct).ConfigureAwait(true);
+
+        // 框里可能留着上次搜的字，先清干净，否则输入会拼在旧字后面
+        NativeMethods.ClearTextField();
+        await Task.Delay(250, ct).ConfigureAwait(true);
+
+        report($"往搜索框里输入「{server}」");
+        NativeMethods.SendUnicodeText(server);
+        await Task.Delay(900, ct).ConfigureAwait(true);
+
+        TextLine? result = await CaptureAndFindResult().ConfigureAwait(true);
+
+        // 有些客户端不认 SendInput 送进来的字（尤其自绘输入框），框里还是空的。
+        // 这时退回剪贴板粘贴——Ctrl+V 是绝大多数输入框都认的路径。
+        if (result is null && !await SearchBoxHasTextAsync().ConfigureAwait(true))
+        {
+            report("输入框里没进字，改用粘贴");
+
+            bool pasted = false;
+            try
+            {
+                System.Windows.Clipboard.SetText(server);
+                pasted = true;
+            }
+            catch (Exception ex)
+            {
+                report($"往剪贴板放文字失败：{ex.Message}");
+            }
+
+            if (pasted)
+            {
+                NativeMethods.TapKey(0, withCtrl: true, key: 0x56); // Ctrl+V
+                await Task.Delay(900, ct).ConfigureAwait(true);
+                result = await CaptureAndFindResult().ConfigureAwait(true);
+            }
+        }
+
+        // 还有的客户端要按回车才会把过滤结果刷出来
+        if (result is null)
+        {
+            report("还没出搜索结果，按一下回车试试");
+            NativeMethods.TapKey(NativeMethods.VK_RETURN, withCtrl: false, key: 0);
+            await Task.Delay(900, ct).ConfigureAwait(true);
+            result = await CaptureAndFindResult().ConfigureAwait(true);
+        }
+
+        if (result is null)
+        {
+            if (!TryCaptureArea(window, out area, out frame) || frame is null)
+            {
+                return (false, "搜完服务器之后抓不到画面");
+            }
+
+            string dump = SaveDebug(frame, "nightforge_server_search.bmp");
+            string seen = string.Join("」「", (await OcrService.RecognizeAsync(frame.Value, thorough: true)
+                .ConfigureAwait(true))
+                .Where(l => l.CenterY > searchBox.CenterY + 2)
+                .Take(6)
+                .Select(l => l.Text));
+
+            return (false, $"在服务器列表里搜「{server}」没搜出结果"
+                           + (seen.Length > 0 ? $"（搜完之后这一屏是「{seen}」）" : "")
+                           + "。可能是字没输进搜索框，也可能没有这个服务器。"
+                           + (dump.Length > 0 ? $"画面已存到 {dump}，发我看一眼。" : ""));
+        }
+
+        report($"搜索结果里有「{result.Text}」，点它");
+        await ClickPointAsync(area, result, $"服务器「{result.Text}」", report, ct).ConfigureAwait(true);
+        await Task.Delay(1800, ct).ConfigureAwait(true);
+        return (true, null);
+
+        // 抓一帧，看看搜索框下方有没有目标服的结果行
+        async Task<TextLine?> CaptureAndFindResult()
+        {
+            if (!TryCaptureArea(window, out LoginArea shot, out ScreenCapturer.Frame? shotFrame)
+                || shotFrame is null)
+            {
+                return null;
+            }
+
+            List<TextLine> shotLines = await OcrService.RecognizeAsync(shotFrame.Value, thorough: true)
+                .ConfigureAwait(true);
+
+            // 点击坐标按这一帧算，别用之前那一帧的
+            area = shot;
+            TextLine? hit = FindServerResult(shotLines, server, searchBox);
+
+            return hit is null
+                ? null
+                : new TextLine(hit.Text, hit.CenterX, hit.CenterY, hit.Width, hit.Height);
+        }
+
+        // 搜索框那一行现在是不是已经填上要被搜的字了
+        async Task<bool> SearchBoxHasTextAsync()
+        {
+            if (!TryCaptureArea(window, out _, out ScreenCapturer.Frame? shot) || shot is null)
+            {
+                return false;
+            }
+
+            List<TextLine> shotLines = await OcrService.RecognizeAsync(shot.Value, thorough: true)
+                .ConfigureAwait(true);
+
+            string target = OcrService.Normalize(server);
+
+            return shotLines.Any(l => Math.Abs(l.CenterY - searchBox.CenterY) < 2.5
+                                       && l.CenterX < 30
+                                       && OcrService.Similarity(OcrService.Normalize(l.Text), target) >= 0.5);
+        }
     }
 
     /// <summary>
@@ -1497,11 +1661,18 @@ public sealed class AutoLoginService
         TextLine? Account,
         TextLine? Server,
         bool HasEmail,
-        TextLine? LoginButton)
+        TextLine? LoginButton,
+        TextLine? Search)
     {
         public bool Anything => Role is not null || Enter is not null || ServerButton is not null
                                 || SwitchAccount is not null || Account is not null || HasEmail
-                                || LoginButton is not null;
+                                || LoginButton is not null || Search is not null;
+
+        /// <summary>
+        /// 服务器列表页（左上角有搜索框那一屏）。这一屏默认只列当前分区的几个服，
+        /// 目标服不在里面时得先用搜索框搜出来——不然会一直等，最后误判成「已进游戏」。
+        /// </summary>
+        public bool IsServerList => Search is not null;
 
         /// <summary>
         /// 快速登录页（记住账号那一屏：邮箱 + 进入游戏 + 使用其他账号登录）。
@@ -1528,11 +1699,19 @@ public sealed class AutoLoginService
 
         // 快通道一个判定词都没认到时，换加强通道（放大 2 倍 + 反色）再认一次。
         // 深底白字、金色描边的按钮常常只有加强通道能认出来，直接判「已进游戏」就是误报成功。
-        if (!found.Anything)
+        // 判据是「有没有能点的东西」，不是 Anything：Anything 里含「有 @ 就算」，
+        // 而服务器列表页那堆分区名里根本没有可点的登录目标，快通道又认不出灰色的
+        // 「搜索」两个字（实测快通道 19 行里没有它，加强通道 25 行才有）——
+        // 用 Anything 会一直不补，最后把这一屏当成「已进游戏」。
+        if (found.Role is null && found.Enter is null && found.ServerButton is null
+            && found.Server is null && found.SwitchAccount is null && found.LoginButton is null)
         {
             List<TextLine> strong = await OcrService.RecognizeAsync(frame, thorough: true).ConfigureAwait(true);
             Found retry = FindAll(strong, accountKey, server);
-            if (retry.Anything)
+
+            if (retry.Role is not null || retry.Enter is not null || retry.ServerButton is not null
+                || retry.Server is not null || retry.SwitchAccount is not null
+                || retry.LoginButton is not null || retry.Search is not null)
             {
                 lines = strong;
                 found = retry;
@@ -1590,6 +1769,7 @@ public sealed class AutoLoginService
             : fromOverlay && found.IsAccountScreen ? "账号页"
             : found.Role is not null ? "角色页"
             : found.ServerButton is not null || found.Server is not null ? "服务器页"
+            : found.IsServerList ? "服务器列表"
             : fromOverlay ? "登录窗加载中"
             : "未知";
 
@@ -1604,6 +1784,7 @@ public sealed class AutoLoginService
         sb.AppendLine($"  使用其他账号登录：{Where(found.SwitchAccount)}");
         sb.AppendLine($"  账号行：{Where(found.Account)}");
         sb.AppendLine($"  服务器行：{Where(found.Server)}");
+        sb.AppendLine($"  服务器搜索框：{Where(found.Search)}");
 
         if (accountKey.Length > 0)
         {
@@ -1621,15 +1802,21 @@ public sealed class AutoLoginService
 
     /// <summary>把一屏的所有判定词一次算齐，换通道重算时不用抄一遍。</summary>
     private static Found FindAll(List<TextLine> lines, string accountKey, string server)
-        => new(
+    {
+        // 先认搜索框：搜完之后框里就显示着服务器名，那一行绝不能被当成「服务器按钮」
+        TextLine? search = FindSearchBox(lines);
+
+        return new Found(
             FindBest(lines, "点击登录"),
             FindBest(lines, "进入游戏"),
             FindBest(lines, "登录游戏"),
             FindBest(lines, "使用其他账号登录", 0.6),
             FindShownAccount(lines, accountKey),
-            server.Length > 0 ? FindBest(lines, server) : null,
+            server.Length > 0 ? FindServerRow(lines, server, search) : null,
             lines.Any(l => l.Text.Contains('@')),
-            FindLoginButton(lines));
+            FindLoginButton(lines),
+            search);
+    }
 
     /// <summary>
     /// 认「这一屏显示的账号」，用来判断要不要换号。
@@ -1652,6 +1839,92 @@ public sealed class AutoLoginService
     }
 
     /// <summary>找「登录」按钮（快通道认不出深底白字时，调用方会换加强通道再算一遍）。</summary>
+    /// <summary>
+    /// 认目标服务器这一行。
+    ///
+    /// 必须排除「红颜知己的搜索结果：」这种标题——它含完整服务器名，相似度满分，
+    /// 点下去只是点到一行字。真正的结果卡片在它下面。
+    /// </summary>
+    private static TextLine? FindServerRow(List<TextLine> lines, string server, TextLine? searchBox)
+    {
+        var candidates = lines
+            .Where(l => !OcrService.Normalize(l.Text).Contains("搜索结果", StringComparison.Ordinal))
+            // 搜索框里的字和服务器名一模一样，但它不是按钮
+            .Where(l => searchBox is null || Math.Abs(l.CenterY - searchBox.CenterY) >= 3)
+            .ToList();
+
+        return FindBest(candidates, server);
+    }
+
+    /// <summary>
+    /// 找服务器列表页左上角那个搜索框。
+    ///
+    /// 空的时候框里写着灰色的「搜索」占位字，直接认它最省事；
+    /// 框里已经有上次搜的字时占位字就不见了，这时退回到「已有角色」按钮上方那一行。
+    /// </summary>
+    private static TextLine? FindSearchBox(List<TextLine> lines)
+    {
+        TextLine? placeholder = FindBest(lines, "搜索", 0.78);
+        if (placeholder is not null)
+        {
+            return placeholder;
+        }
+
+        TextLine? anchor = FindBest(lines, "已有角色", 0.68);
+        if (anchor is null)
+        {
+            return null;
+        }
+
+        // 搜索框在「已有角色」正上方、左侧那一栏。
+        // 必须限制在左栏（中心 x < 28%）：右边是服务器名字（35%、68%），
+        // 不管这个就会把「再续前缘」当成搜索框，然后往服务器按钮上打字。
+        return lines
+            .Where(l => l.CenterX < 28 && l.CenterY < anchor.CenterY - 2)
+            .Where(l => l.CenterY > anchor.CenterY - 14)
+            .OrderByDescending(l => l.CenterY)
+            .FirstOrDefault();
+    }
+
+    /// <summary>
+    /// 搜索之后的结果行。搜索框里也会显示同一串字，所以必须排除；
+    /// 「XXX的搜索结果：」那行标题同理。
+    /// </summary>
+    /// <summary>给命令行探针用：直接看这一屏搜出来的结果行是哪一行。</summary>
+    public static TextLine? FindServerResultForProbe(List<TextLine> lines, string server, TextLine searchBox)
+        => FindServerResult(lines, server, searchBox);
+
+    private static TextLine? FindServerResult(List<TextLine> lines, string server, TextLine searchBox)
+    {
+        string target = OcrService.Normalize(server);
+        TextLine? best = null;
+        double bestScore = 0;
+
+        foreach (TextLine line in lines)
+        {
+            if (line.CenterY <= searchBox.CenterY + 2)
+            {
+                continue;
+            }
+
+            string text = OcrService.Normalize(line.Text);
+            if (text.Length == 0 || text.Contains("搜索结果", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            double score = OcrService.Similarity(text, target);
+            if (score > bestScore)
+            {
+                bestScore = score;
+                best = line;
+            }
+        }
+
+        // 服务器名一般 4 个字，认错一两个字也要认（0.62 ≈ 4 个字里对 2.5 个）
+        return bestScore >= 0.62 ? best : null;
+    }
+
     private static TextLine? FindLoginButton(List<TextLine> lines)
     {
         TextLine? best = null;

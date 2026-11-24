@@ -389,6 +389,129 @@ internal static class NativeMethods
     /// <summary>DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 的值。</summary>
     public static readonly IntPtr DPI_PER_MONITOR_AWARE_V2 = new(-4);
 
+    // ---------- 键盘：输入中文 ----------
+    // keybd_event 只能发虚拟键码，打不出汉字。服务器搜索要输「红颜知己」这种中文，
+    // 只能用 SendInput + KEYEVENTF_UNICODE：它直接送字符码点，绕过输入法、不依赖输入法状态。
+
+    public const uint INPUT_KEYBOARD = 1;
+    public const uint KEYEVENTF_UNICODE = 0x0004;
+    public const byte VK_CONTROL = 0x11;
+    public const byte VK_DELETE = 0x2E;
+    public const byte VK_BACK = 0x08;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct KEYBDINPUT
+    {
+        public ushort wVk;
+        public ushort wScan;
+        public uint dwFlags;
+        public uint time;
+        public IntPtr dwExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MOUSEINPUT
+    {
+        public int dx;
+        public int dy;
+        public uint mouseData;
+        public uint dwFlags;
+        public uint time;
+        public IntPtr dwExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Explicit)]
+    public struct INPUTUNION
+    {
+        [FieldOffset(0)] public MOUSEINPUT mi;
+        [FieldOffset(0)] public KEYBDINPUT ki;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct INPUT
+    {
+        public uint type;
+        public INPUTUNION u;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
+
+    /// <summary>直接打入一串文字（支持中文）：逐字符发「按下 + 抬起」。</summary>
+    public static void SendUnicodeText(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return;
+        }
+
+        var inputs = new List<INPUT>(text.Length * 2);
+
+        foreach (char ch in text)
+        {
+            inputs.Add(UnicodeKey(ch, down: true));
+            inputs.Add(UnicodeKey(ch, down: false));
+        }
+
+        SendInput((uint)inputs.Count, inputs.ToArray(), Marshal.SizeOf<INPUT>());
+        Thread.Sleep(80);
+    }
+
+    private static INPUT UnicodeKey(char ch, bool down) => new()
+    {
+        type = INPUT_KEYBOARD,
+        u = new INPUTUNION
+        {
+            ki = new KEYBDINPUT
+            {
+                wVk = 0,
+                wScan = ch,
+                dwFlags = KEYEVENTF_UNICODE | (down ? 0u : KEYEVENTF_KEYUP),
+                dwExtraInfo = IntPtr.Zero
+            }
+        }
+    };
+
+    /// <summary>清空输入框：Ctrl+A 全选 + Delete，再补一串退格（自绘框常常不理 Delete）。</summary>
+    public static void ClearTextField()
+    {
+        TapKey(0, withCtrl: true, key: 0x41); // Ctrl+A
+        Thread.Sleep(60);
+        TapKey(VK_DELETE, withCtrl: false, key: 0);
+        Thread.Sleep(60);
+
+        for (int i = 0; i < 24; i++)
+        {
+            TapKey(VK_BACK, withCtrl: false, key: 0);
+        }
+
+        Thread.Sleep(80);
+    }
+
+    /// <summary>敲一下键。withCtrl 时按住 Ctrl 再敲 key（此时 key 是字母键码）。</summary>
+    public static void TapKey(byte vk, bool withCtrl, byte key)
+    {
+        byte code = withCtrl ? key : vk;
+
+        if (withCtrl)
+        {
+            keybd_event(VK_CONTROL, 0, 0, UIntPtr.Zero);
+            Thread.Sleep(20);
+        }
+
+        keybd_event(code, 0, 0, UIntPtr.Zero);
+        Thread.Sleep(30);
+        keybd_event(code, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+
+        if (withCtrl)
+        {
+            Thread.Sleep(20);
+            keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+        }
+
+        Thread.Sleep(20);
+    }
+
     /// <summary>某个窗口当前所在显示器的 DPI（96 = 100%，120 = 125%）。</summary>
     [DllImport("user32.dll")]
     public static extern uint GetDpiForWindow(IntPtr hwnd);

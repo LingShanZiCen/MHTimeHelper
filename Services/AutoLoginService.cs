@@ -264,29 +264,16 @@ public sealed class AutoLoginService
 
                 switchTried = true;
 
-                // 账号页上还没打开表单：先点「使用其他账号登录」把表单叫出来
-                if (onAccountScreen && found.SwitchAccount is not null
-                    && !await ClickOnceAsync(found.SwitchAccount, "使用其他账号登录", "switch-account", 2200)
-                        .ConfigureAwait(true))
+                // 换号入口就是账号框右边那个三角，直接把账号列表拉出来挑号。
+                // （子流程里三角点不开时，会自己退回点「使用其他账号登录」再试一次）
+                (bool switched, string? switchReason) = await SwitchAccountAsync(clickTarget, accountFull, report, ct)
+                    .ConfigureAwait(true);
+                if (!switched)
                 {
-                    return fatalReason ?? "「使用其他账号登录」点了好几次都没有反应";
+                    return switchReason;
                 }
 
-                if (onLoginForm || found.SwitchAccount is not null)
-                {
-                    (bool switched, string? switchReason) = await SwitchAccountAsync(clickTarget, accountFull, report, ct)
-                        .ConfigureAwait(true);
-                    if (!switched)
-                    {
-                        return switchReason;
-                    }
-
-                    continue;
-                }
-
-                report("这一屏没看到「使用其他账号登录」，只能按当前记着的账号进。"
-                       + "要换号，请先手动点一下「使用其他账号登录」再重试。");
-                warnedAfterSwitch = true;
+                continue;
             }
             else if (switchTried && accountDiffers && !warnedAfterSwitch)
             {
@@ -819,9 +806,10 @@ public sealed class AutoLoginService
     /// <summary>
     /// 换成指定账号。
     ///
-    /// 「使用其他账号登录」之后的表单里，账号框右边有个下三角，点开就是客户端记住的登录历史，
-    /// 从里面挑目标账号再点「登录」——历史是客户端自己存的，所以换号不用密码、也不用敲键盘。
-    /// 历史里没有这个号时如实说明，不猜密码、不乱点。
+    /// 实测（用户截图）：账号框右边那个三角就是换号入口——点开之后，客户端记住的账号
+    /// 直接在窗口里一条条列出来，点哪个就用哪个号登，既不用密码、也不用敲键盘。
+    /// 所以这里先点三角；三角点不开，再退回「使用其他账号登录」重试一次。
+    /// 列表里没有这个号时如实说明，不猜密码、不乱点。
     /// </summary>
     private async Task<(bool Ok, string? Reason)> SwitchAccountAsync(
         IntPtr gameHwnd,
@@ -829,158 +817,140 @@ public sealed class AutoLoginService
         Action<string> report,
         CancellationToken ct)
     {
-        DateTime deadline = DateTime.UtcNow.AddSeconds(20);
+        string lastProblem = "";
 
-        TextLine? field = null;
-        TextLine? submit = null;
-        List<TextLine> lines = [];
-        ScreenCapturer.Frame? frame = null;
-        LoginArea area = default;
-
-        // 1) 等表单出来：账号框里有字（邮箱 / 手机号），并且有「登录」按钮。
-        //    换号页有时是新开的一个窗口（不再是原来那个悬浮窗），所以先认悬浮窗，
-        //    几秒还没出来就把同进程的其它小窗口也试一遍。
-        DateTime started = DateTime.UtcNow;
-        bool ready = false;
-
-        while (DateTime.UtcNow < deadline)
+        // 第 1 轮：直接点三角（常态）；第 2 轮：三角没反应，点「使用其他账号登录」再点三角
+        for (int attempt = 0; attempt < 2; attempt++)
         {
             ct.ThrowIfCancellationRequested();
 
-            bool includeOthers = (DateTime.UtcNow - started).TotalSeconds >= 5;
-
-            foreach (IntPtr window in SwitchWindows(gameHwnd, includeOthers))
+            if (!TryCaptureLoginArea(gameHwnd, out LoginArea area, out ScreenCapturer.Frame? frame)
+                || frame is null)
             {
-                if (!TryCaptureArea(window, out LoginArea candidateArea, out ScreenCapturer.Frame? captured)
-                    || captured is null)
-                {
-                    continue;
-                }
-
-                frame ??= captured;
-
-                List<TextLine> scanned = await OcrService.RecognizeAsync(captured.Value, thorough: true)
-                    .ConfigureAwait(true);
-
-                TextLine? login = FindLoginButton(scanned);
-                if (login is null)
-                {
-                    continue;
-                }
-
-                TextLine? textField = FindAccountField(scanned, login);
-                if (textField is null)
-                {
-                    continue;
-                }
-
-                area = candidateArea;
-                frame = captured;
-                lines = scanned;
-                field = textField;
-                submit = login;
-                ready = true;
-                break;
-            }
-
-            if (ready)
-            {
-                break;
-            }
-
-            await Task.Delay(400, ct).ConfigureAwait(true);
-        }
-
-        if (!ready || field is null)
-        {
-            string dump = SaveDebug(frame, "nightforge_switch_form.bmp");
-            return (false, "点了「使用其他账号登录」之后没看到账号输入框（这一屏可能不是账号密码登录）。"
-                           + (dump.Length > 0 ? $"画面已存到 {dump}，发我看一眼就能对上。" : ""));
-        }
-
-        report($"账号框里现在是「{field.Text}」，点它右边的下三角，打开账号历史…");
-
-        // 2) 下三角是图不是字，OCR 看不到。按账号框这一行横向试几个位置，弹出来为止。
-        List<TextLine> history = [];
-        bool opened = false;
-
-        foreach (double x in DropdownCandidates(field))
-        {
-            var triangle = new TextLine("▾", x, field.CenterY, 0, 0);
-            await ClickPointAsync(area, triangle, $"账号框右边的下三角（{x:F0}%）", report, ct)
-                .ConfigureAwait(true);
-            await Task.Delay(800, ct).ConfigureAwait(true);
-
-            if (!TryCaptureArea(area.Window, out area, out frame) || frame is null)
-            {
+                await Task.Delay(700, ct).ConfigureAwait(true);
                 continue;
             }
 
-            lines = await OcrService.RecognizeAsync(frame.Value, thorough: true).ConfigureAwait(true);
-            history = AccountsBelow(lines, field);
-            if (history.Count > 0)
+            List<TextLine> lines = await OcrService.RecognizeAsync(frame.Value, thorough: true).ConfigureAwait(true);
+            TextLine? field = FindShownField(lines);
+
+            if (field is null)
             {
-                opened = true;
-                break;
+                lastProblem = "这一屏认不出账号输入框";
+                await Task.Delay(1000, ct).ConfigureAwait(true);
+                continue;
             }
-        }
 
-        if (!opened)
-        {
-            string dump = SaveDebug(frame, "nightforge_switch_form.bmp");
-            return (false, "没能点开账号框右边的历史记录（下三角）。"
-                           + (dump.Length > 0 ? $"这一屏已存到 {dump}，发我一下我按实际位置对。" : ""));
-        }
-
-        // 3) 在历史里挑目标账号
-        TextLine? pick = null;
-        double bestScore = 0;
-        foreach (TextLine item in history)
-        {
-            double score = AccountSimilarity(item.Text, account);
-            if (score > bestScore)
+            // 账号框里已经是目标号，不用换
+            if (AccountMatches(field.Text, account))
             {
-                bestScore = score;
-                pick = item;
-            }
-        }
-
-        if (pick is null || bestScore < 0.6)
-        {
-            // 列表没认出来，但账号框里本来就是目标号：直接把表单提交了，也算换对
-            if (submit is not null && AccountMatches(field.Text, account))
-            {
-                report($"账号框里已经是「{field.Text}」，历史列表没认出来也不要紧，直接点「登录」");
-                await ClickPointAsync(area, submit, "登录", report, ct).ConfigureAwait(true);
-                await Task.Delay(3000, ct).ConfigureAwait(true);
                 return (true, null);
             }
 
-            string seen = string.Join("」「", history.Take(6).Select(l => l.Text));
-            return (false, $"账号历史里没看到「{account}」" + (seen.Length > 0 ? $"（这一列是「{seen}」）" : "")
-                           + "。先用这个账号手动登录一次，让客户端记住它，再点开始登录。");
-        }
-
-        report($"在账号历史里点「{pick.Text}」（要登录的是「{account}」）");
-        await ClickPointAsync(area, pick, $"账号历史里的「{pick.Text}」", report, ct).ConfigureAwait(true);
-        await Task.Delay(1500, ct).ConfigureAwait(true);
-
-        // 4) 有的客户端选完直接进，有的还要再点一下「登录」
-        if (TryCaptureArea(area.Window, out area, out frame) && frame is not null)
-        {
-            List<TextLine> after = await OcrService.RecognizeAsync(frame.Value, thorough: true).ConfigureAwait(true);
-            TextLine? button = FindLoginButton(after);
-            bool alreadyIn = FindBest(after, "进入游戏") is not null;
-
-            if (button is not null && !alreadyIn)
+            if (attempt == 1)
             {
-                report("选完账号还要点一下「登录」");
-                await ClickPointAsync(area, button, "登录", report, ct).ConfigureAwait(true);
-                await Task.Delay(3000, ct).ConfigureAwait(true);
+                TextLine? switchLink = FindBest(lines, "使用其他账号登录", 0.6);
+                if (switchLink is null)
+                {
+                    lastProblem = "这一屏也没有「使用其他账号登录」";
+                    continue;
+                }
+
+                report("三角点不开账号列表，改成点「使用其他账号登录」再试一次");
+                await ClickPointAsync(area, switchLink, "使用其他账号登录", report, ct).ConfigureAwait(true);
+                await Task.Delay(1800, ct).ConfigureAwait(true);
+
+                if (!TryCaptureLoginArea(gameHwnd, out area, out frame) || frame is null)
+                {
+                    continue;
+                }
+
+                lines = await OcrService.RecognizeAsync(frame.Value, thorough: true).ConfigureAwait(true);
+                field = FindShownField(lines);
+                if (field is null)
+                {
+                    lastProblem = "点了「使用其他账号登录」之后认不出账号输入框";
+                    continue;
+                }
             }
+
+            report($"账号框里现在是「{field.Text}」，点它右边的三角，把账号列表拉出来…");
+
+            // 列表可能已经开着（上一次点开了），先看一眼，别又点一下把它收回去
+            List<TextLine> history = AccountsBelow(lines, field);
+
+            if (history.Count == 0)
+            {
+                // 三角是图形，OCR 看不到：先从像素里把它找出来，找不到再按常见位置试
+                double? fromPixels = FindTriangleX(frame.Value, field);
+
+                var candidates = new List<double>();
+                if (fromPixels is not null)
+                {
+                    candidates.Add(fromPixels.Value);
+                }
+
+                candidates.AddRange(DropdownCandidates(field));
+
+                foreach (double x in candidates)
+                {
+                    var triangle = new TextLine("▾", x, field.CenterY, 0, 0);
+                    await ClickPointAsync(area, triangle, $"账号框右边的三角（{x:F0}%）", report, ct)
+                        .ConfigureAwait(true);
+                    await Task.Delay(700, ct).ConfigureAwait(true);
+
+                    if (!TryCaptureLoginArea(gameHwnd, out area, out frame) || frame is null)
+                    {
+                        continue;
+                    }
+
+                    lines = await OcrService.RecognizeAsync(frame.Value, thorough: true).ConfigureAwait(true);
+                    field = FindShownField(lines) ?? field;
+                    history = AccountsBelow(lines, field);
+                    if (history.Count > 0)
+                    {
+                        break;
+                    }
+                }
+            }
+
+            if (history.Count == 0)
+            {
+                lastProblem = "点了三角也没把账号列表拉出来";
+                continue;
+            }
+
+            // 在列表里挑目标账号：比域名，126 和 163 是两个号
+            TextLine? pick = null;
+            double bestScore = 0;
+            foreach (TextLine item in history)
+            {
+                double score = AccountSimilarity(item.Text, account);
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    pick = item;
+                }
+            }
+
+            if (pick is null || bestScore < 0.6)
+            {
+                string seen = string.Join("」「", history.Take(6).Select(l => l.Text));
+                string dump = SaveDebug(frame, "nightforge_switch_list.bmp");
+                return (false, $"账号列表里没有「{account}」" + (seen.Length > 0 ? $"（看到的是「{seen}」）" : "")
+                               + "。先用这个号手动登录一次，让客户端记住它，再点开始登录。"
+                               + (dump.Length > 0 ? $"（列表已存到 {dump}）" : ""));
+            }
+
+            report($"在账号列表里点「{pick.Text}」（要登录的是「{account}」）");
+            await ClickPointAsync(area, pick, $"账号列表里的「{pick.Text}」", report, ct).ConfigureAwait(true);
+            await Task.Delay(2000, ct).ConfigureAwait(true);
+            return (true, null);
         }
 
-        return (true, null);
+        return (false, $"换账号没成功：{lastProblem}。"
+                       + "可以手动点一下账号框右边的三角，看看能不能拉出账号列表；"
+                       + "能拉出来却还是换不过去，把日志发我。");
     }
 
     /// <summary>
@@ -1033,62 +1003,14 @@ public sealed class AutoLoginService
         return true;
     }
 
-    /// <summary>换号流程要看的窗口：先账号悬浮窗，需要时再补同进程的其它小窗口。</summary>
-    private static List<IntPtr> SwitchWindows(IntPtr gameHwnd, bool includeOthers)
-    {
-        var list = new List<IntPtr>();
-
-        IntPtr overlay = LoginOverlay.Find(gameHwnd);
-        list.Add(overlay != IntPtr.Zero ? overlay : gameHwnd);
-
-        if (!includeOthers)
-        {
-            return list;
-        }
-
-        NativeMethods.GetWindowThreadProcessId(gameHwnd, out uint pid);
-
-        NativeMethods.EnumWindows((candidate, _) =>
-        {
-            if (candidate == gameHwnd || list.Contains(candidate) || !NativeMethods.IsWindowVisible(candidate))
-            {
-                return true;
-            }
-
-            NativeMethods.GetWindowThreadProcessId(candidate, out uint candidatePid);
-            if (candidatePid != pid)
-            {
-                return true;
-            }
-
-            if (!NativeMethods.GetClientRect(candidate, out NativeMethods.RECT rc))
-            {
-                return true;
-            }
-
-            int width = rc.Right - rc.Left;
-            int height = rc.Bottom - rc.Top;
-            if (width is < 200 or > 1100 || height is < 200 or > 1200)
-            {
-                return true;
-            }
-
-            list.Add(candidate);
-            return list.Count < 5;   // 最多看 5 个窗口，别把几十个辅助窗口全抓一遍
-        }, IntPtr.Zero);
-
-        return list;
-    }
-
     /// <summary>
-    /// 找账号输入框那一行。优先带 @ 的（已经填着账号）；否则找「请输入账号」这类占位字，
-    /// 并且必须在「登录」按钮上方——否则会把标题栏的「账号登录」当成输入框。
+    /// 找账号输入框那一行：取最上面那行带 @ 的（账号框在列表上方）。
+    /// 认不出邮箱时退回「请输入账号」这类占位字，且别把底部的「使用其他账号登录」当输入框。
     /// </summary>
-    private static TextLine? FindAccountField(List<TextLine> lines, TextLine submit)
+    private static TextLine? FindShownField(List<TextLine> lines)
     {
         TextLine? email = lines
             .Where(l => l.Text.Contains('@'))
-            .Where(l => l.CenterY < submit.CenterY)
             .OrderBy(l => l.CenterY)
             .FirstOrDefault();
 
@@ -1098,10 +1020,10 @@ public sealed class AutoLoginService
         }
 
         return lines
-            .Where(l => l.CenterY < submit.CenterY - 4)
+            .Where(l => !l.Text.Contains("使用其他账号"))
             .Where(l => l.Text.Contains("请输入") || l.Text.Contains("帐号") || l.Text.Contains("账号")
                         || l.Text.Contains("邮箱") || l.Text.Contains("手机"))
-            .OrderByDescending(l => l.CenterY)
+            .OrderBy(l => l.CenterY)
             .FirstOrDefault();
     }
 
@@ -1134,11 +1056,84 @@ public sealed class AutoLoginService
         Click(x, y);
     }
 
-    /// <summary>下三角的横向候选：先试账号文字右边缘，再退到画面右侧几个常见位置。</summary>
+    /// <summary>
+    /// 从画面里找出账号框右边那个三角的横向位置（百分比）。找不到返回 null。
+    ///
+    /// 三角是图形，OCR 完全看不到，按百分比猜差几个像素就点空（实测三角只有 10 像素宽）。
+    /// 所以直接看像素：在账号文字那一行的高度上、从文字右边缘往右扫，
+    /// 找到第一团连续的深色像素——面板底色浅、输入框白、边框也不深，深色团只能是三角。
+    /// </summary>
+    public static double? FindTriangleX(ScreenCapturer.Frame frame, TextLine field)
+    {
+        if (frame.Width <= 8 || frame.Height <= 8)
+        {
+            return null;
+        }
+
+        int x0 = (int)Math.Round(frame.Width * (field.Left + field.Width) / 100.0) + 6;
+        int y0 = (int)Math.Round(frame.Height * field.Top / 100.0) - 3;
+        int y1 = (int)Math.Round(frame.Height * (field.Top + field.Height) / 100.0) + 3;
+
+        x0 = Math.Clamp(x0, 1, frame.Width - 2);
+        y0 = Math.Clamp(y0, 0, frame.Height - 2);
+        y1 = Math.Clamp(y1, y0 + 1, frame.Height - 1);
+
+        int stride = frame.Width;
+        int runStart = -1;
+
+        for (int x = x0; x < frame.Width - 2; x++)
+        {
+            int dark = 0;
+
+            for (int y = y0; y <= y1; y++)
+            {
+                int offset = (y * stride + x) * 4;
+                int b = frame.Pixels[offset];
+                int g = frame.Pixels[offset + 1];
+                int r = frame.Pixels[offset + 2];
+
+                if ((r + g + b) / 3 < 110)
+                {
+                    dark++;
+                }
+            }
+
+            bool isDark = dark >= 2;
+
+            if (isDark && runStart < 0)
+            {
+                runStart = x;
+            }
+            else if (!isDark && runStart >= 0)
+            {
+                int runWidth = x - runStart;
+
+                // 太窄是边框/噪点，太宽是别的东西
+                if (runWidth is >= 3 and <= 26)
+                {
+                    return (runStart + runWidth / 2.0) * 100.0 / stride;
+                }
+
+                runStart = -1;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// 三角的横向候选：先按实测的几个常见位置试（窗口右侧那一带），
+    /// 再退回「账号文字右边缘」——窗口大小不同时也能兜住。
+    /// </summary>
     private static IEnumerable<double> DropdownCandidates(TextLine field)
     {
-        var list = new List<double> { field.Left + field.Width + 1.5, field.Left + field.Width + 4 };
-        list.AddRange(DropdownCandidatePercents);
+        var list = new List<double>(DropdownCandidatePercents)
+        {
+            field.Left + field.Width + 1.5,
+            field.Left + field.Width + 4,
+            field.Left + field.Width + 8
+        };
+
         return list.Where(x => x is > 5 and < 96).Distinct();
     }
 
@@ -1149,22 +1144,13 @@ public sealed class AutoLoginService
             .OrderBy(l => l.CenterY)
             .ToList();
 
-    /// <summary>这行像不像账号（邮箱 / 手机号 / 一串字母数字）。</summary>
+    /// <summary>这行像不像账号（邮箱 / 手机号 / 一串字母数字）。中文标签会被 CleanAccount 滤掉。</summary>
     private static bool LooksLikeAccountText(string text)
     {
-        string s = OcrService.Normalize(text);
-        if (s.Length < 4)
-        {
-            return false;
-        }
+        string s = CleanAccount(text);
 
-        if (s.Contains('@'))
-        {
-            return true;
-        }
-
-        // 历史列表里可能只显示「liaozicen041203」这样的前缀
-        return s.All(ch => char.IsAsciiLetterOrDigit(ch) || ch is '.' or '_' or '-');
+        // 邮箱最稳；只显示前缀时（liaozicen041203）要有一定长度，别把「163」这种碎片当账号
+        return s.Length >= 4 && (s.Contains('@') || s.Length >= 6);
     }
 
     /// <summary>
@@ -1189,7 +1175,9 @@ public sealed class AutoLoginService
 
         if (ai > 0 && bi > 0)
         {
-            if (!string.Equals(a[(ai + 1)..], b[(bi + 1)..], StringComparison.Ordinal))
+            // 只比域名主段（163.com → 163）：OCR 常把「.com」认成「℃ om」或丢字，
+            // 直接比整段会全部对不上；126 和 163 的差别也正好在主段上
+            if (!string.Equals(DomainKey(a[(ai + 1)..]), DomainKey(b[(bi + 1)..]), StringComparison.Ordinal))
             {
                 return 0;
             }
@@ -1216,6 +1204,30 @@ public sealed class AutoLoginService
         }
 
         return OcrService.Similarity(pa, pb);
+    }
+
+    /// <summary>
+    /// 域名主段：163.com → 163、126om → 126。
+    /// OCR 把「.com」认成「℃ om」「. om」、或者干脆丢字都很常见，
+    /// 而不同邮箱服务商（126 / 163 / qq）的区别就在主段上，所以只比主段最稳。
+    /// </summary>
+    private static string DomainKey(string domain)
+    {
+        int dot = domain.IndexOf('.');
+        if (dot > 0)
+        {
+            return domain[..dot];
+        }
+
+        foreach (string suffix in new[] { "comcn", "com", "con", "corn", "cn", "net", "org", "om" })
+        {
+            if (domain.Length > suffix.Length && domain.EndsWith(suffix, StringComparison.Ordinal))
+            {
+                return domain[..^suffix.Length];
+            }
+        }
+
+        return domain;
     }
 
     /// <summary>
@@ -1247,7 +1259,11 @@ public sealed class AutoLoginService
         return true;
     }
 
-    /// <summary>把账号行归一化：去空格、转小写、把认错的中文标点换回 . 和 @。</summary>
+    /// <summary>
+    /// 把账号行归一化：去空格、转小写、把认错的中文标点换回 . 和 @，
+    /// 并且只留账号里可能出现的字符——OCR 常把右边的「×」、头像字、中文标签黏进同一行，
+    /// 带着它们比域名会全都对不上（实测「liaozicen041203@163.com ×」会被当成 163.com×）。
+    /// </summary>
     private static string CleanAccount(string text)
     {
         var sb = new StringBuilder(text.Length);
@@ -1255,17 +1271,23 @@ public sealed class AutoLoginService
         foreach (char raw in text)
         {
             char ch = char.ToLowerInvariant(raw);
+
             if (char.IsWhiteSpace(ch))
             {
                 continue;
             }
 
-            sb.Append(ch switch
+            ch = ch switch
             {
                 '＠' => '@',
                 '。' or '，' or '、' or '·' or '•' => '.',
                 _ => ch
-            });
+            };
+
+            if (char.IsAsciiLetterOrDigit(ch) || ch is '@' or '.' or '_' or '-' or '*')
+            {
+                sb.Append(ch);
+            }
         }
 
         return sb.ToString();

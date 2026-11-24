@@ -457,8 +457,119 @@ internal static class NativeMethods
         Thread.Sleep(80);
     }
 
-    private static INPUT UnicodeKey(char ch, bool down) => new()
+    // ---------- 直接把字符消息投给窗口（不经过键盘队列） ----------
+    //
+    // 梦幻这类十几年前写的中文客户端，输入框多半是 ANSI/MBCS 的：它期望收到的是
+    // **GBK 字节**（WM_IME_CHAR 一次一个字节，或者 WM_CHAR 的 wParam 塞一个双字节）。
+    // 而 SendInput + KEYEVENTF_UNICODE 递过去的是 UTF-16 码点，客户端按 GBK 解释不出来，
+    // 输入框里就只剩一个空心方块——实测就是这样。
+    // 所以这里补两条「按 GBK 递字」的路径。
+
+    public const uint WM_CHAR = 0x0102;
+    public const uint WM_IME_CHAR = 0x0286;
+
+    /// <summary>逐字投递 WM_CHAR，wParam 是 UTF-16 码点（Unicode 客户端用）。</summary>
+    public static void PostUnicodeChars(IntPtr hwnd, string text)
     {
+        foreach (char ch in text)
+        {
+            PostMessage(hwnd, WM_CHAR, (IntPtr)ch, (IntPtr)1);
+            Thread.Sleep(25);
+        }
+
+        Thread.Sleep(120);
+    }
+
+    /// <summary>
+    /// 逐字投递 WM_CHAR，但 wParam 塞的是这个字的 **GBK 双字节**（ANSI 客户端用）。
+    /// 这是中文 Windows 上老程序收到中文时的真实形态。
+    /// </summary>
+    public static void PostAnsiChars(IntPtr hwnd, string text)
+    {
+        foreach (byte[] unit in ToGbkUnits(text))
+        {
+            int packed = unit.Length == 1 ? unit[0] : (unit[0] << 8) | unit[1];
+            PostMessage(hwnd, WM_CHAR, (IntPtr)packed, (IntPtr)1);
+            Thread.Sleep(25);
+        }
+
+        Thread.Sleep(120);
+    }
+
+    /// <summary>
+    /// 逐字节投递 WM_IME_CHAR：一个汉字拆成两个 GBK 字节、两条消息。
+    /// MBCS 客户端自己的输入法就是走这条路，认得最全。
+    /// </summary>
+    public static void PostImeChars(IntPtr hwnd, string text)
+    {
+        foreach (byte[] unit in ToGbkUnits(text))
+        {
+            foreach (byte b in unit)
+            {
+                PostMessage(hwnd, WM_IME_CHAR, (IntPtr)b, (IntPtr)1);
+                Thread.Sleep(20);
+            }
+        }
+
+        Thread.Sleep(120);
+    }
+
+    /// <summary>
+    /// 往窗口投一串退格（WM_CHAR 的 8）。游戏输入框不吃系统级 Ctrl+A / Delete，
+    /// 换输入方式之前得用它把框清空，否则几条路的字会叠在一起。
+    /// </summary>
+    public static void PostBackspaces(IntPtr hwnd, int count = 24)
+    {
+        for (int i = 0; i < count; i++)
+        {
+            PostMessage(hwnd, WM_CHAR, (IntPtr)8, (IntPtr)1);
+        }
+
+        Thread.Sleep(80);
+    }
+
+    /// <summary>把字符串按 GBK 拆成「一个字一组」的字节（ASCII 1 字节，汉字 2 字节）。</summary>
+    private static List<byte[]> ToGbkUnits(string text)
+    {
+        var units = new List<byte[]>();
+        foreach (char ch in text)
+        {
+            byte[] gbk = ToGbk(ch.ToString());
+            if (gbk.Length > 0)
+            {
+                units.Add(gbk);
+            }
+        }
+
+        return units;
+    }
+
+    /// <summary>Unicode → 系统 ANSI 代码页（中文 Windows 上是 GBK/936）的字节。</summary>
+    private static byte[] ToGbk(string text)
+    {
+        int need = WideCharToMultiByte(936, 0, text, text.Length, null, 0, IntPtr.Zero, IntPtr.Zero);
+        if (need <= 0)
+        {
+            return [];
+        }
+
+        var buffer = new byte[need];
+        int wrote = WideCharToMultiByte(936, 0, text, text.Length, buffer, need, IntPtr.Zero, IntPtr.Zero);
+        return wrote <= 0 ? [] : buffer;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern int WideCharToMultiByte(
+        int codePage,
+        uint flags,
+        string wideCharStr,
+        int wideCharCount,
+        byte[]? multiByteStr,
+        int multiByteCount,
+        IntPtr defaultChar,
+        IntPtr usedDefaultChar);
+
+    private static INPUT UnicodeKey(char ch, bool down) => new()    {
         type = INPUT_KEYBOARD,
         u = new INPUTUNION
         {

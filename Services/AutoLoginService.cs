@@ -125,7 +125,7 @@ public sealed class AutoLoginService
 
         // 服务器搜索也只做一次：目标服不在列表里时用左上角搜索框搜出来
         bool serverSearched = false;
-        bool serverCardTried = false;
+        int serverCardTries = 0;
         TextLine? searchBoxAt = null;
 
         // 点击失败的确切原因（比如游戏卡死）。上层直接用它报错，别再说「没有反应」这种废话。
@@ -435,12 +435,19 @@ public sealed class AutoLoginService
                 // 结果直接进了上次的角色。
                 if (server.Length > 0 && serverLine is null)
                 {
-                    TextLine? card = FindServerCardAbove(lines, serverButton);
+                    TextLine card = FindServerCardAbove(lines, serverButton);
 
-                    if (card is not null && !serverCardTried)
+                    // 卡片要连点两次才肯开的情况是有的（界面动画没走完，第一下点空了），
+                    // 所以这里允许试两次：第一次按认到的位置，第二次按几何位置。
+                    if (serverCardTries < 2)
                     {
-                        serverCardTried = true;
-                        SaveDebug(frame, "nightforge_server_page.bmp");
+                        serverCardTries++;
+
+                        if (serverCardTries == 1)
+                        {
+                            SaveDebug(frame, "nightforge_server_page.bmp");
+                        }
+
                         report($"这一屏是「上次登录的服务器」，先点卡片「{card.Text}」进完整服务器列表");
 
                         if (!await ClickOnceAsync(card, $"服务器卡片「{card.Text}」", "server-card", 2500)
@@ -453,9 +460,7 @@ public sealed class AutoLoginService
                     }
 
                     string dump = SaveDebug(frame, "nightforge_server_page.bmp");
-                    return (card is null
-                               ? "这一屏只看到「登录游戏」，没看到上面的服务器卡片，"
-                               : "点了服务器卡片之后还是没出现完整的服务器列表，")
+                    return "点了服务器卡片之后还是没出现完整的服务器列表，"
                            + $"找不到「{server}」。没有点「登录游戏」——那是进上次玩过的角色，会跳过选服选角。"
                            + (dump.Length > 0 ? $"（画面已存到 {dump}，发我一眼就能对上。）" : "");
                 }
@@ -918,41 +923,68 @@ public sealed class AutoLoginService
 
         // 框里可能留着上次搜的字，先清干净，否则输入会拼在旧字后面
         NativeMethods.ClearTextField();
+        NativeMethods.PostBackspaces(window);
         await Task.Delay(250, ct).ConfigureAwait(true);
 
-        report($"往搜索框里输入「{server}」");
-        NativeMethods.SendUnicodeText(server);
-        await Task.Delay(900, ct).ConfigureAwait(true);
-
-        TextLine? result = await CaptureAndFindResult().ConfigureAwait(true);
-
-        // 有些客户端不认 SendInput 送进来的字（尤其自绘输入框），框里还是空的。
-        // 这时退回剪贴板粘贴——Ctrl+V 是绝大多数输入框都认的路径。
-        if (result is null && !await SearchBoxHasTextAsync().ConfigureAwait(true))
-        {
-            report("输入框里没进字，改用粘贴");
-
-            bool pasted = NativeMethods.SetClipboardText(server);
-            if (!pasted)
+        // 游戏输入框收不收、按什么编码收，各家客户端不一样，只能挨个试、每次都抓图验证。
+        // 实测梦幻这类十几年前写的中文客户端要的是 **GBK 字节**，而系统级 Unicode 输入
+        // 递过去是 UTF-16 码点，它按 GBK 解释不出来——输入框里只剩一个空心方块（用户看到的「空白的口」）。
+        // 所以先试两条按字节递的路，再退回 Unicode 和剪贴板：
+        // 1) WM_IME_CHAR 一个字节一条消息——MBCS 客户端自己的输入法走的就是这条
+        // 2) WM_CHAR 里塞 GBK 双字节——ANSI 窗口的另一种常见形态
+        // 3) 系统级 Unicode 输入
+        // 4) 剪贴板 + Ctrl+V
+        (string Name, Action Send)[] attempts =
+        [
+            ("输入法字节消息", () => NativeMethods.PostImeChars(window, server)),
+            ("GBK 双字节消息", () => NativeMethods.PostAnsiChars(window, server)),
+            ("系统 Unicode 输入", () => NativeMethods.SendUnicodeText(server)),
+            ("剪贴板粘贴", () =>
             {
-                report("往剪贴板放文字失败，跳过粘贴这条兜底");
+                if (NativeMethods.SetClipboardText(server))
+                {
+                    NativeMethods.TapKey(0, withCtrl: true, key: 0x56); // Ctrl+V
+                }
+            }),
+        ];
+
+        TextLine? result = null;
+        string boxNow = "";
+
+        foreach ((string name, Action send) in attempts)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            report($"往搜索框里输入「{server}」（{name}）");
+            send();
+            await Task.Delay(900, ct).ConfigureAwait(true);
+
+            result = await CaptureAndFindResult().ConfigureAwait(true);
+            if (result is not null)
+            {
+                break;
             }
 
-            if (pasted)
+            boxNow = await ReadSearchBoxAsync().ConfigureAwait(true);
+            bool typed = boxNow.Length > 0 && boxNow != "搜索";
+
+            if (typed)
             {
-                NativeMethods.TapKey(0, withCtrl: true, key: 0x56); // Ctrl+V
+                // 字进框了但右侧还没过滤出来，补一次回车（有的客户端要按回车才刷新）
+                report($"框里现在是「{boxNow}」，按一下回车把结果刷出来");
+                NativeMethods.TapKey(NativeMethods.VK_RETURN, withCtrl: false, key: 0);
                 await Task.Delay(900, ct).ConfigureAwait(true);
                 result = await CaptureAndFindResult().ConfigureAwait(true);
+                if (result is not null)
+                {
+                    break;
+                }
             }
-        }
 
-        // 还有的客户端要按回车才会把过滤结果刷出来
-        if (result is null)
-        {
-            report("还没出搜索结果，按一下回车试试");
-            NativeMethods.TapKey(NativeMethods.VK_RETURN, withCtrl: false, key: 0);
-            await Task.Delay(900, ct).ConfigureAwait(true);
-            result = await CaptureAndFindResult().ConfigureAwait(true);
+            // 这一路没成，把框清空再试下一条，免得几条路的字叠在一起
+            NativeMethods.ClearTextField();
+            NativeMethods.PostBackspaces(window);
+            await Task.Delay(200, ct).ConfigureAwait(true);
         }
 
         if (result is null)
@@ -970,6 +1002,7 @@ public sealed class AutoLoginService
                 .Select(l => l.Text));
 
             return (false, $"在服务器列表里搜「{server}」没搜出结果"
+                           + (boxNow.Length > 0 ? $"（搜索框里现在是「{boxNow}」）" : "")
                            + (seen.Length > 0 ? $"（搜完之后这一屏是「{seen}」）" : "")
                            + "。可能是字没输进搜索框，也可能没有这个服务器。"
                            + (dump.Length > 0 ? $"画面已存到 {dump}，发我看一眼。" : ""));
@@ -1002,23 +1035,24 @@ public sealed class AutoLoginService
                 : new TextLine(hit.Text, hit.CenterX, hit.CenterY, hit.Width, hit.Height);
         }
 
-        // 搜索框那一行现在是不是已经填上要被搜的字了
-        async Task<bool> SearchBoxHasTextAsync()
+        // 搜索框那一行现在显示着什么（空框时是灰色的「搜索」占位字）
+        async Task<string> ReadSearchBoxAsync()
         {
             if (!TryCaptureArea(window, out _, out ScreenCapturer.Frame? shot, captureBelow: false)
                 || shot is null)
             {
-                return false;
+                return "";
             }
 
             List<TextLine> shotLines = await OcrService.RecognizeAsync(shot.Value, thorough: true)
                 .ConfigureAwait(true);
 
-            string target = OcrService.Normalize(server);
+            TextLine? line = shotLines
+                .Where(l => Math.Abs(l.CenterY - box.CenterY) < 3 && l.CenterX < 32)
+                .OrderBy(l => Math.Abs(l.CenterX - box.CenterX))
+                .FirstOrDefault();
 
-            return shotLines.Any(l => Math.Abs(l.CenterY - box.CenterY) < 2.5
-                                       && l.CenterX < 30
-                                       && OcrService.Similarity(OcrService.Normalize(l.Text), target) >= 0.5);
+            return line is null ? "" : line.Text.Replace(" ", "");
         }
     }
 
@@ -1945,15 +1979,54 @@ public sealed class AutoLoginService
     /// 服务器页上「登录游戏」按钮正上方的那张服务器卡片（卡片上写着上次登录的服名）。
     /// 点它才会展开完整的服务器列表——也就是有搜索框的那一屏。
     /// </summary>
-    private static TextLine? FindServerCardAbove(List<TextLine> lines, TextLine serverButton)
+    /// <summary>给命令行探针用：看这一屏会把哪一行当成「上次登录的服务器卡片」。</summary>
+    public static TextLine? FindServerCardForProbe(List<TextLine> lines, TextLine serverButton)
+        => FindServerCardAbove(lines, serverButton);
+
+    private static TextLine FindServerCardAbove(List<TextLine> lines, TextLine serverButton)
     {
-        return lines
+        // 先按文字找：卡片上是「⊙ 服务器名」，两到六个字。
+        // 光靠「在登录游戏上方、x 差不多」不够——实测窗口 1 把卡片下面的装饰认成了
+        // 「一 ： 0 ， ． 毒 嚹 ， 产 生 0」（55.0%, 61.8%），比真卡片更靠下，
+        // 按 CenterY 取最靠下就正好点到它，卡片一点没动。
+        TextLine? byText = lines
             .Where(l => l.CenterY < serverButton.CenterY - 6 && l.CenterY > serverButton.CenterY - 24)
             .Where(l => Math.Abs(l.CenterX - serverButton.CenterX) < 24)
-            .Where(l => OcrService.Normalize(l.Text) is { Length: >= 2 and <= 12 })
-            .Where(l => !OcrService.Normalize(l.Text).Contains("登录", StringComparison.Ordinal))
+            .Where(l => LooksLikeServerCard(l.Text))
             .OrderByDescending(l => l.CenterY)
             .FirstOrDefault();
+
+        if (byText is not null)
+        {
+            return byText;
+        }
+
+        // 一个像样的候选都没有（卡片是动画飞进来的、刚好糊成一团）就按位置点：
+        // 实测卡片中心就在「登录游戏」正上方 12% 处，x 与「登录游戏」基本对齐
+        // （卡片是条长条，左右各差几个百分点也还在里面）。点空最多是没反应，不会误进游戏。
+        return new TextLine("（服务器卡片·按位置）", serverButton.CenterX, serverButton.CenterY - 12.1, 4, 3);
+    }
+
+    /// <summary>
+    /// 这一行像不像服务器卡片上的名字：纯汉字（允许开头一个圈/数字当图标），
+    /// 两到八个字，且不像乱码那样夹着一堆标点。
+    /// </summary>
+    private static bool LooksLikeServerCard(string text)
+    {
+        string n = OcrService.Normalize(text);
+        if (n.Length is < 2 or > 8 || n.Contains("登录", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        const string junk = "，。．、；：！？,./;:!?·…—-_~@#%&*()（）【】「」《》<>+=";
+        if (n.Any(c => junk.Contains(c)))
+        {
+            return false;
+        }
+
+        int han = n.Count(c => c >= 0x4E00 && c <= 0x9FFF);
+        return han >= 2 && han >= n.Length - 1;
     }
 
     /// <summary>

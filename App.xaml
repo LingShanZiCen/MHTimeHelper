@@ -374,6 +374,35 @@
                 </Setter>
             </Style>
 
+            <!-- 快速导航里的小胶囊：点一下滚到对应卡片，当前所在那一节高亮 -->
+            <Style x:Key="NavChip" TargetType="Button">
+                <Setter Property="Height" Value="26" />
+                <Setter Property="MinWidth" Value="0" />
+                <Setter Property="FontSize" Value="12" />
+                <Setter Property="Padding" Value="11,0" />
+                <Setter Property="Margin" Value="0,0,2,0" />
+                <Setter Property="Foreground" Value="{StaticResource TextMuted}" />
+                <Setter Property="Background" Value="Transparent" />
+                <Setter Property="Cursor" Value="Hand" />
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="Button">
+                            <Border x:Name="Bd" CornerRadius="6"
+                                    Background="{TemplateBinding Background}"
+                                    Padding="{TemplateBinding Padding}">
+                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                            </Border>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="Bd" Property="Background" Value="#1F2634" />
+                                    <Setter Property="Foreground" Value="{StaticResource TextPrimary}" />
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
+
             <!-- 卡片内的小按钮（浏览 / 设置 / 清空 / 导出） -->
             <Style x:Key="SmallButton" TargetType="Button" BasedOn="{StaticResource SecondaryButton}">
                 <Setter Property="Height" Value="32" />

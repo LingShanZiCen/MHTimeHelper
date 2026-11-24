@@ -74,6 +74,7 @@ public partial class MainWindow : Window
         InitTray();
         InitMonitor();
         UpdateAdminBanner();
+        UpdateNavHighlight();
 
         TxtVersion.Text = $"v{UpdateService.CurrentVersionText}";
         _log.Add($"幻夜工坊已启动（版本 {UpdateService.CurrentVersionText}）。");
@@ -1534,6 +1535,105 @@ public partial class MainWindow : Window
 
         TxtLog.AppendText(line + Environment.NewLine);
         TxtLog.ScrollToEnd();
+    }
+
+    /// <summary>快速导航：点一下把对应卡片滚到可视区顶部。</summary>
+    private void OnNavClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { Tag: string key } && FindName(key) is FrameworkElement card)
+        {
+            NavigateTo(card);
+        }
+    }
+
+    private void NavigateTo(FrameworkElement card)
+    {
+        // 点亮被点的那一节：列表短的时候最后几张卡片都挤在底部，
+        // 光看滚动位置分不出是哪一张，只有点击这一下知道你的意图。
+        _navClickAt = DateTime.UtcNow;
+        ApplyNavHighlight(card.Name);
+
+        // 不用 BringIntoView：它只保证「看得到」，卡片本来露一半时就只挪一点。
+        // 按内容偏移直接滚到卡片顶部，才是导航该有的手感（最后一节会被自动夹到底部）。
+        ConfigScroll.ScrollToVerticalOffset(card.TranslatePoint(new Point(0, 0), ConfigStack).Y);
+    }
+
+    /// <summary>点导航之后 300ms 内的滚动是程序自己滚的，别拿位置去覆盖刚点亮的那一节。</summary>
+    private DateTime _navClickAt = DateTime.MinValue;
+
+    private void OnConfigScrollChanged(object sender, ScrollChangedEventArgs e)
+    {
+        if ((DateTime.UtcNow - _navClickAt).TotalMilliseconds < 300)
+        {
+            return;
+        }
+
+        UpdateNavHighlight();
+    }
+
+    /// <summary>
+    /// 按滚动位置点亮当前所在的那一节：取「顶部已越过视口上沿」的最后一张卡片；
+    /// 滚到底时最后一张往往顶不过上沿（卡片比视口矮），这时直接算最后一节。
+    /// </summary>
+    private void UpdateNavHighlight()
+    {
+        if (ConfigStack.Children.Count == 0 || ConfigStack.ActualHeight <= 0)
+        {
+            return;
+        }
+
+        double offset = ConfigScroll.VerticalOffset;
+        double scrollable = ConfigScroll.ScrollableHeight;
+        bool atBottom = scrollable > 40 && offset >= scrollable - 20;
+
+        string? current = null;
+        string? last = null;
+
+        foreach (UIElement child in ConfigStack.Children)
+        {
+            if (child is not FrameworkElement { Name.Length: > 0 } card)
+            {
+                continue;
+            }
+
+            last = card.Name;
+
+            if (!atBottom && card.TranslatePoint(new Point(0, 0), ConfigStack).Y - offset <= 12)
+            {
+                current = card.Name;
+            }
+        }
+
+        current ??= atBottom ? last : null;
+        current ??= ConfigStack.Children.OfType<FrameworkElement>().FirstOrDefault(c => c.Name.Length > 0)?.Name;
+
+        ApplyNavHighlight(current);
+    }
+
+    private void ApplyNavHighlight(string? name)
+    {
+        foreach (UIElement child in NavBar.Children)
+        {
+            if (child is not Button chip)
+            {
+                continue;
+            }
+
+            bool on = chip.Tag as string == name;
+            chip.Foreground = (System.Windows.Media.Brush)FindResource(on ? "AccentCyan" : "TextMuted");
+            chip.Background = on ? NavActiveBackground : System.Windows.Media.Brushes.Transparent;
+            chip.FontWeight = on ? FontWeights.SemiBold : FontWeights.Normal;
+        }
+    }
+
+    private static readonly System.Windows.Media.Brush NavActiveBackground = MakeNavBackground();
+
+    private static System.Windows.Media.Brush MakeNavBackground()
+    {
+        var brush = new System.Windows.Media.SolidColorBrush(
+            System.Windows.Media.Color.FromRgb(0x1E, 0x2A, 0x3F));
+        brush.Freeze();
+        return brush;
     }
 
     /// <summary>折叠 / 展开日志，把空间让给上面的配置区（日志平时不用一直盯着）。</summary>

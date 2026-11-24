@@ -418,9 +418,9 @@ public sealed class AutoLoginService
     }
 
     /// <summary>
-    /// 服务器页和角色页的按钮不一样：服务器页是「登录游戏」，角色页才有「点击登录」。
-    /// 走到角色这一步时若还看不到「点击登录」，就先点「登录游戏」把页面推进去。
-    /// 这样「服务器」「角色」都留空也能一路点到底。
+    /// 服务器页上没有「点击登录」，只有「服务器名 + 登录游戏」。角色列表要点服务器名字才会出来，
+    /// 所以在没填服务器的情况下，点「登录游戏」一般会直接进上次玩的角色——这也算达到目的。
+    /// 填了服务器时不会走到这里（那一步已经点过名字了）。
     /// </summary>
     private async Task AdvanceToRoleScreenAsync(IntPtr hwnd, Action<string> report, CancellationToken ct)
     {
@@ -436,7 +436,8 @@ public sealed class AutoLoginService
             return;
         }
 
-        await ClickLineAsync(hwnd, forward, $"推进到角色页（{forward.Text}）", report, ct).ConfigureAwait(true);
+        report($"没看到角色列表，先点「{forward.Text}」直接进（想要指定角色，请在设置里填上服务器名）");
+        await ClickLineAsync(hwnd, forward, forward.Text, report, ct).ConfigureAwait(true);
         await Task.Delay(1200, ct).ConfigureAwait(true);
     }
 
@@ -515,7 +516,8 @@ public sealed class AutoLoginService
             return (true, null);
         }
 
-        return (false, $"没找到角色「{character}」，可把名字缩短一点（比如只填两个字）");
+        return (false, $"没找到角色「{character}」，可把名字缩短一点（比如只填两个字）；"
+                       + "也可能是还没进到角色列表——把服务器名也填上，服务器页要点服务器名字才会列出角色");
     }
 
     private async Task ClickLineAsync(

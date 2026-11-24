@@ -106,6 +106,9 @@ public sealed class AutoLoginService
         // 点过「进入游戏」的时刻。刚点完的几秒里悬浮窗还没关，不能接着重复点。
         DateTime? enterClickedAt = null;
 
+        // 点击失败的确切原因（比如游戏卡死）。上层直接用它报错，别再说「没有反应」这种废话。
+        string? fatalReason = null;
+
         while (!ct.IsCancellationRequested)
         {
             if (DateTime.UtcNow > deadline)
@@ -191,16 +194,32 @@ public sealed class AutoLoginService
             }
 
             // 同一屏同一个按钮连点三次画面都没变，说明这一下点不动，别再空转
-            async Task<bool> ClickOnceAsync(TextLine line, string description, string key)
+            async Task<bool> ClickOnceAsync(TextLine line, string description, string key, int waitAfterMs = 2000)
             {
+                // 动手之前先问一句「这窗口还活着吗」。
+                // 游戏卡死的时候窗口还在、画面还是最后一帧，点多少下都没反应，
+                // 继续连点只会看起来像在乱操作，不如立刻说清楚。
+                if (!NativeMethods.IsWindowResponsive(clickTarget))
+                {
+                    fatalReason = "游戏窗口没有响应（看起来已经卡住了）。请把这个游戏窗口关掉、重新打开，再点开始登录。";
+                    report(fatalReason);
+                    return false;
+                }
+
                 if (key == lastClickKey)
                 {
                     sameClickTimes++;
                     if (sameClickTimes >= 3)
                     {
                         report($"「{description}」连点 {sameClickTimes} 次画面都没变，先停在这里");
+                        fatalReason ??= $"「{description}」连点了 {sameClickTimes} 次画面都没有变化。请看一眼游戏窗口是不是卡住了。";
                         return false;
                     }
+
+                    // 画面没变多半是在加载（连服务器 / 切场景），越急着点越乱
+                    int waitMs = 2500 * sameClickTimes;
+                    report($"「{description}」还没反应，等 {waitMs / 1000.0:F0} 秒再试（游戏加载慢时很常见）");
+                    await Task.Delay(waitMs, ct).ConfigureAwait(true);
                 }
                 else
                 {
@@ -209,7 +228,10 @@ public sealed class AutoLoginService
                 }
 
                 await ClickLineAsync(clickTarget, line, description, report, ct).ConfigureAwait(true);
-                await Task.Delay(1300, ct).ConfigureAwait(true);
+
+                // 点击后给游戏反应时间。连服务器、切场景都要好几秒，
+                // 等太短就会把「还在加载」当成「没点动」，然后对着加载画面重复点。
+                await Task.Delay(waitAfterMs, ct).ConfigureAwait(true);
                 return true;
             }
 
@@ -226,9 +248,9 @@ public sealed class AutoLoginService
 
                 if (enterButton is not null)
                 {
-                    if (!await ClickOnceAsync(enterButton, "进入游戏", "enter").ConfigureAwait(true))
+                    if (!await ClickOnceAsync(enterButton, "进入游戏", "enter", 4000).ConfigureAwait(true))
                     {
-                        return "「进入游戏」点了好几次都没有反应";
+                        return fatalReason ?? "「进入游戏」点了好几次都没有反应";
                     }
 
                     enterClickedAt = DateTime.UtcNow;
@@ -243,7 +265,7 @@ public sealed class AutoLoginService
                     report($"按钮文字认不出来（识别为「{fallback.Text}」），按位置点这个主按钮。");
                     if (!await ClickOnceAsync(fallback, "主按钮（按位置）", "enter-fallback").ConfigureAwait(true))
                     {
-                        return "主按钮点了好几次都没有反应";
+                        return fatalReason ?? "主按钮点了好几次都没有反应";
                     }
 
                     enterClickedAt = DateTime.UtcNow;
@@ -271,7 +293,7 @@ public sealed class AutoLoginService
                     report("没有填角色名，点第一个「点击登录」（若进错角色，请把角色名填上）。");
                     if (!await ClickOnceAsync(roleButton, "点击登录", "role-any").ConfigureAwait(true))
                     {
-                        return "「点击登录」点了好几次都没有反应";
+                        return fatalReason ?? "「点击登录」点了好几次都没有反应";
                     }
                 }
 
@@ -285,7 +307,7 @@ public sealed class AutoLoginService
             {
                 if (!await ClickOnceAsync(serverLine, $"服务器「{server}」", "server").ConfigureAwait(true))
                 {
-                    return $"点了好几次「{server}」都没有反应";
+                    return fatalReason ?? $"点了好几次「{server}」都没有反应";
                 }
 
                 continue;
@@ -294,9 +316,9 @@ public sealed class AutoLoginService
             // 4) 只有「登录游戏」、没有服务器名（还没选过服务器的启动页）
             if (serverButton is not null)
             {
-                if (!await ClickOnceAsync(serverButton, "登录游戏", "server-enter").ConfigureAwait(true))
+                if (!await ClickOnceAsync(serverButton, "登录游戏", "server-enter", 4500).ConfigureAwait(true))
                 {
-                    return "「登录游戏」点了好几次都没有反应";
+                    return fatalReason ?? "「登录游戏」点了好几次都没有反应";
                 }
 
                 continue;

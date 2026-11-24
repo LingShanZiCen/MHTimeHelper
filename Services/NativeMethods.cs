@@ -75,6 +75,9 @@ internal static class NativeMethods
     public const uint WM_CLOSE = 0x0010;
     public const uint BM_CLICK = 0x00F5;
 
+    public const uint WM_NULL = 0x0000;
+    public const uint SMTO_ABORTIFHUNG = 0x0002;
+
     public const byte VK_RETURN = 0x0D;
     public const byte VK_MENU = 0x12;
     public const uint KEYEVENTF_KEYUP = 0x0002;
@@ -150,6 +153,44 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool IsWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern IntPtr SendMessageTimeout(
+        IntPtr hWnd,
+        uint Msg,
+        IntPtr wParam,
+        IntPtr lParam,
+        uint fuFlags,
+        uint uTimeout,
+        out IntPtr lpdwResult);
+
+    /// <summary>
+    /// 窗口还在不在处理消息。
+    /// 游戏卡死（无响应）时点它不会有任何反应，继续点只会让情况更糟，所以动手前先问一句。
+    /// </summary>
+    public static bool IsWindowResponsive(IntPtr hwnd, uint timeoutMs = 600)
+    {
+        if (hwnd == IntPtr.Zero || !IsWindow(hwnd))
+        {
+            return false;
+        }
+
+        try
+        {
+            return SendMessageTimeout(
+                hwnd,
+                WM_NULL,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                SMTO_ABORTIFHUNG,
+                timeoutMs,
+                out _) != IntPtr.Zero;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]

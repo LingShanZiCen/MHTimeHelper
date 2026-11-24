@@ -65,117 +65,186 @@ public sealed class AutoLoginService
             await Task.Delay(settings.StartDelaySec * 1000, ct).ConfigureAwait(true);
         }
 
-        int timeout = settings.StepTimeoutSec;
+        string accountKey = target.Account.Split('@')[0].Trim();
+        string server = target.Server.Trim();
+        string character = target.Character.Trim();
 
-        // 1) 通用按钮：账号界面的「登录游戏」→ 角色界面的「进入游戏」
-        if (settings.AutoClickLogin)
+        // 登录过程中界面会自己跳：账号页 → 服务器页 → 角色页 → 游戏内，
+        // 失败时还会往回退。所以不按固定顺序硬点，而是每一轮先认清楚当前停在哪一屏，再决定点哪。
+        int stepTimeout = settings.StepTimeoutSec;
+        DateTime deadline = DateTime.UtcNow.AddSeconds(Math.Max(stepTimeout, 10) * 3 + 15);
+
+        string lastScreen = "";
+        string lastClickKey = "";
+        int sameClickTimes = 0;
+        int silentRounds = 0;
+        bool warnedAccount = false;
+
+        while (!ct.IsCancellationRequested)
         {
-            // 账号界面的主按钮写的是「进入游戏」（不是「登录游戏」），两个都认
-            TextLine? login = await WaitForAnyAsync(hwnd, ["登录游戏", "进入游戏"], 8, report, ct).ConfigureAwait(true);
-            if (login is not null)
+            if (DateTime.UtcNow > deadline)
             {
-                await ClickLineAsync(hwnd, login, "登录游戏", report, ct).ConfigureAwait(true);
-                await Task.Delay(1200, ct).ConfigureAwait(true);
+                return "登录超时：画面一直没出现可以点的按钮，可能网络卡住，或停在没见过的界面";
             }
-            else
+
+            ScreenCapturer.Frame? frame = ScreenCapturer.Capture(hwnd);
+            if (frame is null)
             {
-                // 账号界面那个大按钮的字是图片字，OCR 认成「豆求腭又」这种，靠文字匹配不到。
-                // 这个界面每次都得点一下，所以退一步：认准画面特征后，按「位置」点它。
+                await Task.Delay(PollIntervalMs, ct).ConfigureAwait(true);
+                continue;
+            }
+
+            List<TextLine> lines = await OcrService.RecognizeAsync(frame.Value).ConfigureAwait(true);
+
+            TextLine? roleButton = FindBest(lines, "点击登录");
+            TextLine? enterButton = FindBest(lines, "进入游戏");
+            TextLine? serverButton = FindBest(lines, "登录游戏");
+            TextLine? switchAccount = FindBest(lines, "使用其他账号登录");
+            TextLine? accountLine = accountKey.Length > 0 ? FindBest(lines, accountKey) : null;
+            TextLine? serverLine = server.Length > 0 ? FindBest(lines, server) : null;
+
+            // 账号页一定有个带 @ 的邮箱，哪怕按钮字是图片、认不出来也能认出这一屏
+            bool onAccountScreen = accountLine is not null
+                                   || switchAccount is not null
+                                   || lines.Any(l => l.Text.Contains('@'));
+
+            string screen = roleButton is not null ? "角色页"
+                : onAccountScreen ? "账号页"
+                : serverButton is not null ? "服务器页"
+                : "未知";
+
+            if (screen != lastScreen)
+            {
+                report($"当前界面：{screen}");
+                lastScreen = screen;
+            }
+
+            // 同一屏同一个按钮连点三次画面都没变，说明这一下点不动，别再空转
+            async Task<bool> ClickOnceAsync(TextLine line, string description, string key)
+            {
+                if (key == lastClickKey)
+                {
+                    sameClickTimes++;
+                    if (sameClickTimes >= 3)
+                    {
+                        report($"「{description}」连点 {sameClickTimes} 次画面都没变，先停在这里");
+                        return false;
+                    }
+                }
+                else
+                {
+                    lastClickKey = key;
+                    sameClickTimes = 0;
+                }
+
+                await ClickLineAsync(hwnd, line, description, report, ct).ConfigureAwait(true);
+                await Task.Delay(1300, ct).ConfigureAwait(true);
+                return true;
+            }
+
+            // 1) 角色列表：一屏可能有好几个「点击登录」，必须按角色名就近配对，绝不点别人的
+            if (roleButton is not null)
+            {
+                silentRounds = 0;
+
+                if (character.Length > 0)
+                {
+                    (bool ok, string? failReason) = await ClickRoleAsync(hwnd, character, stepTimeout, report, ct)
+                        .ConfigureAwait(true);
+                    if (!ok)
+                    {
+                        return failReason;
+                    }
+                }
+                else
+                {
+                    report("没有填角色名，点第一个「点击登录」（若进错角色，请把角色名填上）。");
+                    if (!await ClickOnceAsync(roleButton, "点击登录", "role-any").ConfigureAwait(true))
+                    {
+                        return "「点击登录」点了好几次都没有反应";
+                    }
+                }
+
+                await Task.Delay(1200, ct).ConfigureAwait(true);
+                continue;
+            }
+
+            // 2) 服务器页：角色列表要点服务器名字才会出来，所以优先点名字
+            if (serverLine is not null && !onAccountScreen)
+            {
+                silentRounds = 0;
+                if (!await ClickOnceAsync(serverLine, $"服务器「{server}」", "server").ConfigureAwait(true))
+                {
+                    return $"点了好几次「{server}」都没有反应";
+                }
+
+                continue;
+            }
+
+            // 3) 账号页：主按钮写的是「进入游戏」，字认不出来时按位置兜底
+            if (enterButton is not null || onAccountScreen)
+            {
+                silentRounds = 0;
+
+                if (accountKey.Length > 0 && !warnedAccount)
+                {
+                    TextLine? emailLine = lines.FirstOrDefault(l => l.Text.Contains('@'));
+                    if (emailLine is not null
+                        && OcrService.Similarity(OcrService.Normalize(emailLine.Text), OcrService.Normalize(accountKey)) < 0.5)
+                    {
+                        warnedAccount = true;
+                        report($"登录框里的账号不是「{accountKey}」（画面显示「{emailLine.Text}」），如需换号请手动切换。");
+                    }
+                }
+
+                if (enterButton is not null)
+                {
+                    if (!await ClickOnceAsync(enterButton, "进入游戏", "enter").ConfigureAwait(true))
+                    {
+                        return "「进入游戏」点了好几次都没有反应";
+                    }
+
+                    continue;
+                }
+
+                // 按钮文字是图片字，OCR 认成「豆求腭又」这种，靠文字匹配不到，只能按位置点
                 TextLine? fallback = await FindAccountScreenButtonAsync(hwnd, ct).ConfigureAwait(true);
                 if (fallback is not null)
                 {
                     report($"按钮文字认不出来（识别为「{fallback.Text}」），按位置点这个主按钮。");
-                    await ClickLineAsync(hwnd, fallback, "主按钮（按位置）", report, ct).ConfigureAwait(true);
-                    await Task.Delay(1500, ct).ConfigureAwait(true);
+                    if (!await ClickOnceAsync(fallback, "主按钮（按位置）", "enter-fallback").ConfigureAwait(true))
+                    {
+                        return "主按钮点了好几次都没有反应";
+                    }
+
+                    continue;
                 }
-                else
+            }
+
+            // 4) 兜底：服务器页的「登录游戏」（没填服务器名时才会走到这里）
+            if (serverButton is not null)
+            {
+                silentRounds = 0;
+                if (!await ClickOnceAsync(serverButton, "登录游戏", "server-enter").ConfigureAwait(true))
                 {
-                    report("画面上没有「登录游戏」按钮，可能已经在后面的界面，继续。");
+                    return "「登录游戏」点了好几次都没有反应";
                 }
-            }
-        }
 
-        // 2) 账号（只核对，不强切）：识别噪声大，切错账号比不切更麻烦
-        if (!string.IsNullOrWhiteSpace(target.Account))
-        {
-            string accountKey = target.Account.Split('@')[0].Trim();
-            TextLine? accountLine = await WaitForAnyAsync(hwnd, [accountKey], 3, null, ct).ConfigureAwait(true);
-            report(accountLine is null
-                ? $"没有在画面上找到账号「{target.Account}」，如果账号不对请手动切换。"
-                : "账号已确认。");
-
-            // 账号确认窗上的「进入游戏」
-            TextLine? enter = await WaitForAnyAsync(hwnd, ["进入游戏"], 2, null, ct).ConfigureAwait(true);
-            if (enter is not null)
-            {
-                await ClickLineAsync(hwnd, enter, "进入游戏", report, ct).ConfigureAwait(true);
-                await Task.Delay(1500, ct).ConfigureAwait(true);
-            }
-        }
-
-        // 3) 服务器：点开服务器行 → 若出现服务器列表，再点一次同名项
-        if (!string.IsNullOrWhiteSpace(target.Server))
-        {
-            TextLine? server = await WaitForAnyAsync(hwnd, [target.Server], timeout, report, ct).ConfigureAwait(true);
-            if (server is null)
-            {
-                return $"没找到服务器「{target.Server}」，可把名称缩短一点（比如只填「红颜」）";
+                continue;
             }
 
-            await ClickLineAsync(hwnd, server, $"服务器「{target.Server}」", report, ct).ConfigureAwait(true);
-            await Task.Delay(900, ct).ConfigureAwait(true);
-
-            // 服务器列表页有「已有角色」「正式服」「轻享服」这些字样；出现说明刚打开列表，得再点一次名字
-            TextLine? marker = await WaitForAnyAsync(hwnd, ["已有角色", "轻享服", "正式服"], 2, null, ct).ConfigureAwait(true);
-            if (marker is not null)
+            // 5) 画面上没有任何登录相关字样：多半已经进游戏了
+            silentRounds++;
+            if (silentRounds >= 4)
             {
-                TextLine? again = await WaitForAnyAsync(hwnd, [target.Server], 5, null, ct).ConfigureAwait(true);
-                if (again is not null)
-                {
-                    await ClickLineAsync(hwnd, again, $"服务器列表里的「{target.Server}」", report, ct).ConfigureAwait(true);
-                    await Task.Delay(900, ct).ConfigureAwait(true);
-                }
-            }
-        }
-
-        // 4) 角色：先认准角色名，再点它正下方那个「点击登录」
-        //    一个服务器里可能有好几个角色，每个卡片下面都有一个「点击登录」，
-        //    全局点第一个会进错号，所以必须按名字就近配对。
-        //    走到这一步时可能还停在服务器页（那页的按钮叫「登录游戏」），先推进去。
-        await AdvanceToRoleScreenAsync(hwnd, report, ct).ConfigureAwait(true);
-
-        string character = target.Character.Trim();
-        if (character.Length > 0)
-        {
-            (bool ok, string? failReason) = await ClickRoleAsync(hwnd, character, timeout, report, ct)
-                .ConfigureAwait(true);
-
-            if (!ok)
-            {
-                return failReason;
-            }
-        }
-        else
-        {
-            TextLine? anyRole = await WaitForAnyAsync(hwnd, ["点击登录"], timeout, report, ct).ConfigureAwait(true);
-            if (anyRole is null)
-            {
-                report("没有角色名可点，也没看到「点击登录」，可能已经在游戏里。");
+                report("画面上已经没有登录按钮，判断已经进到游戏里了。");
                 return null;
             }
 
-            report("没有填角色名，点第一个「点击登录」（若进错角色，请把角色名填上）。");
-            await ClickLineAsync(hwnd, anyRole, "点击登录", report, ct).ConfigureAwait(true);
+            await Task.Delay(PollIntervalMs, ct).ConfigureAwait(true);
         }
 
-        // 5) 最后可能还有个「进入游戏」确认
-        TextLine? confirm = await WaitForAnyAsync(hwnd, ["进入游戏"], 2, null, ct).ConfigureAwait(true);
-        if (confirm is not null)
-        {
-            await ClickLineAsync(hwnd, confirm, "进入游戏", report, ct).ConfigureAwait(true);
-        }
-
-        return null;
+        return "已取消";
     }
 
     /// <summary>只做识别、不点击，用来在设置界面里试跑「能不能认出这些字」。</summary>

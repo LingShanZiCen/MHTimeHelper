@@ -1,3 +1,4 @@
+using System.Text;
 using System.IO;
 using Nightforge.Models;
 
@@ -116,47 +117,16 @@ public sealed class AutoLoginService
 
             captureFailures = 0;
 
-            List<TextLine> lines = await OcrService.RecognizeAsync(frame.Value).ConfigureAwait(true);
+            (Found found, List<TextLine> lines) = await RecognizeFoundAsync(frame.Value, accountKey, server)
+                .ConfigureAwait(true);
 
-            // 快通道一个登录相关字样都没认出来时，换加强通道（放大 2 倍 + 反色）再认一次。
-            // 深底白字的按钮经常只有加强通道能认出来，直接判「已进游戏」会误报成功。
-            if (!lines.Any(l => l.Text.Contains('@')
-                                || Similar(l.Text, "进入游戏") >= 0.5
-                                || Similar(l.Text, "点击登录") >= 0.5
-                                || Similar(l.Text, "登录游戏") >= 0.5))
-            {
-                lines = await OcrService.RecognizeAsync(frame.Value, thorough: true).ConfigureAwait(true);
-            }
-
-            TextLine? roleButton = FindBest(lines, "点击登录");
-            TextLine? enterButton = FindBest(lines, "进入游戏");
-            TextLine? serverButton = FindBest(lines, "登录游戏");
-            TextLine? switchAccount = FindBest(lines, "使用其他账号登录");
-            TextLine? accountLine = accountKey.Length > 0 ? FindBest(lines, accountKey) : null;
-            TextLine? serverLine = server.Length > 0 ? FindBest(lines, server) : null;
-
-            // 账号页一定有带 @ 的邮箱；「使用其他账号登录」也只在那一屏出现
-            bool looksLikeAccountScreen = accountLine is not null
-                                          || switchAccount is not null
-                                          || lines.Any(l => l.Text.Contains('@'));
-
-            // 账号页的「进入游戏」是白字深底，快通道经常认不出来（只认得出上面的邮箱）。
-            // 既然已经确定停在这一屏，就换加强通道把它找准——总比按位置瞎点稳妥。
-            if (looksLikeAccountScreen && enterButton is null)
-            {
-                List<TextLine> strong = await OcrService.RecognizeAsync(frame.Value, thorough: true).ConfigureAwait(true);
-                TextLine? strongEnter = FindBest(strong, "进入游戏");
-                if (strongEnter is not null)
-                {
-                    lines = strong;
-                    roleButton = FindBest(lines, "点击登录");
-                    enterButton = strongEnter;
-                    serverButton = FindBest(lines, "登录游戏");
-                    switchAccount = FindBest(lines, "使用其他账号登录");
-                    accountLine = accountKey.Length > 0 ? FindBest(lines, accountKey) : null;
-                    serverLine = server.Length > 0 ? FindBest(lines, server) : null;
-                }
-            }
+            TextLine? roleButton = found.Role;
+            TextLine? enterButton = found.Enter;
+            TextLine? serverButton = found.ServerButton;
+            TextLine? switchAccount = found.SwitchAccount;
+            TextLine? accountLine = found.Account;
+            TextLine? serverLine = found.Server;
+            bool looksLikeAccountScreen = found.IsAccountScreen;
 
             // 账号页一定有个带 @ 的邮箱，哪怕按钮字是图片、认不出来也能认出这一屏
             bool onAccountScreen = looksLikeAccountScreen
@@ -722,6 +692,106 @@ public sealed class AutoLoginService
         Thread.Sleep(50);
         NativeMethods.mouse_event(NativeMethods.MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
     }
+
+    /// <summary>一屏的判定结果：每个登录相关字样有没有命中，命中了在哪。</summary>
+    public readonly record struct Found(
+        TextLine? Role,
+        TextLine? Enter,
+        TextLine? ServerButton,
+        TextLine? SwitchAccount,
+        TextLine? Account,
+        TextLine? Server,
+        bool HasEmail)
+    {
+        public bool Anything => Role is not null || Enter is not null || ServerButton is not null
+                                || SwitchAccount is not null || Account is not null || HasEmail;
+
+        public bool IsAccountScreen => Account is not null || SwitchAccount is not null || HasEmail;
+    }
+
+    /// <summary>
+    /// 认字 + 判定，不点击。给登录流程用，也给「识别测试」和命令行探针用，
+    /// 保证看到的结果和真正跑起来时一模一样。
+    /// </summary>
+    public async Task<(Found Found, List<TextLine> Lines)> RecognizeFoundAsync(
+        ScreenCapturer.Frame frame,
+        string accountKey,
+        string server)
+    {
+        List<TextLine> lines = await OcrService.RecognizeAsync(frame).ConfigureAwait(true);
+        Found found = FindAll(lines, accountKey, server);
+
+        // 快通道一个判定词都没认到时，换加强通道（放大 2 倍 + 反色）再认一次。
+        // 深底白字、金色描边的按钮常常只有加强通道能认出来，直接判「已进游戏」就是误报成功。
+        if (!found.Anything)
+        {
+            List<TextLine> strong = await OcrService.RecognizeAsync(frame, thorough: true).ConfigureAwait(true);
+            Found retry = FindAll(strong, accountKey, server);
+            if (retry.Anything)
+            {
+                lines = strong;
+                found = retry;
+            }
+        }
+
+        // 账号页的「进入游戏」是白字深底，快通道经常认不出来（只认得出上面的邮箱）。
+        // 既然已经确定停在这一屏，就换加强通道把它找准——总比按位置瞎点稳妥。
+        if (found.IsAccountScreen && found.Enter is null)
+        {
+            List<TextLine> strong = await OcrService.RecognizeAsync(frame, thorough: true).ConfigureAwait(true);
+            Found retry = FindAll(strong, accountKey, server);
+            if (retry.Enter is not null)
+            {
+                lines = strong;
+                found = retry;
+            }
+        }
+
+        return (found, lines);
+    }
+
+    /// <summary>判定这一屏是什么，并说明下一步该点哪。</summary>
+    public async Task<string> DescribeScreenAsync(IntPtr hwnd, string accountKey, string server)
+    {
+        ScreenCapturer.Frame? frame = ScreenCapturer.Capture(hwnd, out string error);
+        if (frame is null)
+        {
+            return "抓不到画面：" + error;
+        }
+
+        (Found found, List<TextLine> lines) = await RecognizeFoundAsync(frame.Value, accountKey, server)
+            .ConfigureAwait(true);
+
+        string screen = found.Role is not null ? "角色页"
+            : found.IsAccountScreen ? "账号页"
+            : found.ServerButton is not null ? "服务器页"
+            : "未知";
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"画面 {frame.Value.Width}×{frame.Value.Height}，认出 {lines.Count} 行");
+        sb.AppendLine($"判定：{screen}");
+        sb.AppendLine($"  点击登录：{Where(found.Role)}");
+        sb.AppendLine($"  进入游戏：{Where(found.Enter)}");
+        sb.AppendLine($"  登录游戏：{Where(found.ServerButton)}");
+        sb.AppendLine($"  使用其他账号登录：{Where(found.SwitchAccount)}");
+        sb.AppendLine($"  账号行：{Where(found.Account)}");
+        sb.AppendLine($"  服务器行：{Where(found.Server)}");
+        return sb.ToString();
+
+        static string Where(TextLine? line)
+            => line is null ? "没找到" : $"「{line.Text}」{line.CenterX:F1}% , {line.CenterY:F1}%";
+    }
+
+    /// <summary>把一屏的所有判定词一次算齐，换通道重算时不用抄一遍。</summary>
+    private static Found FindAll(List<TextLine> lines, string accountKey, string server)
+        => new(
+            FindBest(lines, "点击登录"),
+            FindBest(lines, "进入游戏"),
+            FindBest(lines, "登录游戏"),
+            FindBest(lines, "使用其他账号登录"),
+            accountKey.Length > 0 ? FindBest(lines, accountKey) : null,
+            server.Length > 0 ? FindBest(lines, server) : null,
+            lines.Any(l => l.Text.Contains('@')));
 
     /// <summary>两段文字像不像（忽略空格标点，0～1）。</summary>
     private static double Similar(string text, string target)

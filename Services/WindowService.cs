@@ -266,8 +266,33 @@ public sealed class WindowService
         return new WindowFrame(origin.X - windowRect.Left, origin.Y - windowRect.Top, extraW, extraH);
     }
 
+    /// <summary>
+    /// 量一批窗口里最大的边框占位。取最大值而不是第一个，
+    /// 是为了让「给标题栏预留多少空间」在所有窗口上一次性算够，不会有某个窗口压线。
+    /// </summary>
+    public WindowFrame MeasureFrame(IReadOnlyList<IntPtr> windows)
+    {
+        WindowFrame max = WindowFrame.None;
+        foreach (IntPtr hwnd in windows)
+        {
+            if (!NativeMethods.IsWindow(hwnd))
+            {
+                continue;
+            }
+
+            WindowFrame frame = MeasureFrame(hwnd);
+            max = new WindowFrame(
+                Math.Max(max.OffsetX, frame.OffsetX),
+                Math.Max(max.OffsetY, frame.OffsetY),
+                Math.Max(max.ExtraWidth, frame.ExtraWidth),
+                Math.Max(max.ExtraHeight, frame.ExtraHeight));
+        }
+
+        return max;
+    }
+
     /// <summary>按排列方案摆放窗口，返回成功摆好的数量。</summary>
-    public int ApplyLayout(IReadOnlyList<IntPtr> windows, LayoutPlan plan, bool resize)
+    public int ApplyLayout(IReadOnlyList<IntPtr> windows, LayoutPlan plan, bool resize, WorkArea keepInside)
     {
         if (plan.IsEmpty || windows.Count == 0)
         {
@@ -284,7 +309,7 @@ public sealed class WindowService
                 continue;
             }
 
-            if (ApplySlot(hwnd, plan.Slots[i], resize))
+            if (ApplySlot(hwnd, plan.Slots[i], resize, keepInside))
             {
                 ok++;
             }
@@ -293,7 +318,7 @@ public sealed class WindowService
         return ok;
     }
 
-    private bool ApplySlot(IntPtr hwnd, WindowSlot slot, bool resize)
+    private bool ApplySlot(IntPtr hwnd, WindowSlot slot, bool resize, WorkArea keepInside)
     {
         if (NativeMethods.IsIconic(hwnd))
         {
@@ -320,7 +345,44 @@ public sealed class WindowService
         uint flags = NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW;
         bool ok = NativeMethods.SetWindowPos(hwnd, IntPtr.Zero, x, y, w, h, flags);
         Thread.Sleep(30);
+
+        // 兜底：万一算出来的位置让标题栏露到屏幕外（比如窗口边框比预估的厚），
+        // 整体把窗口推回工作区内。只挪不缩，保证最小化 / 关闭按钮永远够得着。
+        ClampIntoWorkArea(hwnd, keepInside);
         return ok;
+    }
+
+    /// <summary>把窗口整块挪进工作区（尺寸不动）。已经在里面就什么都不做。</summary>
+    private static void ClampIntoWorkArea(IntPtr hwnd, WorkArea area)
+    {
+        if (area.Width <= 0 || area.Height <= 0)
+        {
+            return;
+        }
+
+        if (!NativeMethods.GetWindowRect(hwnd, out NativeMethods.RECT rc))
+        {
+            return;
+        }
+
+        int w = rc.Right - rc.Left;
+        int h = rc.Bottom - rc.Top;
+        if (w <= 0 || h <= 0)
+        {
+            return;
+        }
+
+        int x = w <= area.Width ? Math.Clamp(rc.Left, area.Left, area.Left + area.Width - w) : area.Left;
+        int y = h <= area.Height ? Math.Clamp(rc.Top, area.Top, area.Top + area.Height - h) : area.Top;
+
+        if (x == rc.Left && y == rc.Top)
+        {
+            return;
+        }
+
+        NativeMethods.SetWindowPos(hwnd, IntPtr.Zero, x, y, w, h,
+            NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW);
+        Thread.Sleep(20);
     }
 
     /// <summary>把全部游戏窗口恢复并逐一前置。</summary>

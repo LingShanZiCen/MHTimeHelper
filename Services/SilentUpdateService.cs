@@ -474,6 +474,20 @@ public static class SilentUpdateService
     /// <summary>新版本启动后清理：删掉旧版本备份与 update 目录里的残留文件。</summary>
     public static void CleanupOldFiles(Action<string>? log = null)
     {
+        CleanupStaleBackups(log);
+
+        foreach (string file in SafeEnumerate(UpdateDir, "*"))
+        {
+            TryDelete(file);
+        }
+    }
+
+    /// <summary>
+    /// 只清理上一版留下的备份文件（*_old.exe），不动 update 目录。
+    /// 每次正常启动都会调一次，避免「旧进程退出慢、备份没删掉」的几十 MB 长期滞留在程序旁边。
+    /// </summary>
+    public static void CleanupStaleBackups(Action<string>? log = null)
+    {
         string dir = ConfigService.AppDirectory;
 
         foreach (string file in SafeEnumerate(dir, "*" + BackupSuffix))
@@ -485,6 +499,7 @@ public static class SilentUpdateService
                 {
                     File.Delete(file);
                     log?.Invoke($"已清理旧版本文件：{Path.GetFileName(file)}");
+                    UpdateLog.Write($"已清理旧版本备份：{Path.GetFileName(file)}");
                     break;
                 }
                 catch
@@ -492,11 +507,6 @@ public static class SilentUpdateService
                     Thread.Sleep(300);
                 }
             }
-        }
-
-        foreach (string file in SafeEnumerate(UpdateDir, "*"))
-        {
-            TryDelete(file);
         }
     }
 

@@ -35,6 +35,7 @@ public static class ChangeLog
     /// <summary>固定展示顺序：新增、优化、修复、更新。</summary>
     public static IReadOnlyList<string> Categories { get; } = ["新增", "优化", "修复", DefaultCategory];
 
+    private const string Version105 = "1.0.5";
     private const string Version104 = "1.0.4";
     private const string Version103 = "1.0.3";
     private const string Version102 = "1.0.2";
@@ -44,6 +45,13 @@ public static class ChangeLog
     /// <summary>内置日志：版本号（不含 v 前缀）→ 条目原文。</summary>
     private static readonly Dictionary<string, string[]> BuiltIn = new(StringComparer.OrdinalIgnoreCase)
     {
+        [Version105] =
+        [
+            "修复：自动适配时窗口标题栏会被顶到屏幕外（只开一个 16:9 窗口时必然出现），最小化/关闭按钮点不到、窗口也拖不回来——现在排列前会先给标题栏和边框预留空间",
+            "修复：排列完成后增加兜底，任何窗口只要超出工作区就整体挪回来（只挪不缩，尺寸和比例都不受影响）",
+            "修复：升级后残留的 Nightforge_old.exe（约 67 MB）以前只在特定方式启动时才清理，现在每次启动都会顺手清掉",
+            "修复：自动下载全部线路都失败时界面上毫无反应，现在会弹窗说明原因，可直接打开下载页，也可让它按断点继续重试",
+        ],
         [Version104] =
         [
             "修复：网络连不上 GitHub 下载页时「已经发现新版本，却一直卡着下不动」——现在会自动切换多条加速线路，一条不通换下一条",

@@ -1,22 +1,20 @@
 {
-  "version": "1.0.4",
+  "version": "1.0.5",
   "url": "https://github.com/LingShanZiCen/MHTimeHelper/releases",
-  "exeUrl": "https://gh-proxy.com/https://github.com/LingShanZiCen/MHTimeHelper/releases/download/v1.0.4/Nightforge.exe",
+  "exeUrl": "https://gh-proxy.com/https://github.com/LingShanZiCen/MHTimeHelper/releases/download/v1.0.5/Nightforge.exe",
   "exeUrls": [
-    "https://gh-proxy.com/https://github.com/LingShanZiCen/MHTimeHelper/releases/download/v1.0.4/Nightforge.exe",
-    "https://ghfast.top/https://github.com/LingShanZiCen/MHTimeHelper/releases/download/v1.0.4/Nightforge.exe",
-    "https://ghproxy.net/https://github.com/LingShanZiCen/MHTimeHelper/releases/download/v1.0.4/Nightforge.exe",
-    "https://github.com/LingShanZiCen/MHTimeHelper/releases/download/v1.0.4/Nightforge.exe"
+    "https://gh-proxy.com/https://github.com/LingShanZiCen/MHTimeHelper/releases/download/v1.0.5/Nightforge.exe",
+    "https://ghfast.top/https://github.com/LingShanZiCen/MHTimeHelper/releases/download/v1.0.5/Nightforge.exe",
+    "https://ghproxy.net/https://github.com/LingShanZiCen/MHTimeHelper/releases/download/v1.0.5/Nightforge.exe",
+    "https://github.com/LingShanZiCen/MHTimeHelper/releases/download/v1.0.5/Nightforge.exe"
   ],
-  "sha256": "ccd6ca1f33c0c483ac85fd67c266beca0f03f0fd87835baa7324e0ff50518ce7",
-  "size": 70486829,
-  "notes": "幻夜工坊 1.0.4：修好了「发现新版本却下不动」的自动更新问题，下载改走多条加速线路并支持断点续传",
+  "sha256": "0915d313c40e2a5610bd47ba9eb68ccd7654fbfe074fd772269e7168131d95fa",
+  "size": 70487866,
+  "notes": "幻夜工坊 1.0.5：修复单个窗口时标题栏被顶到屏幕外的问题，补上残留备份清理与下载失败提示",
   "changes": [
-    "修复：网络连不上 GitHub 下载页时「已经发现新版本，却一直卡着下不动」——现在会自动切换多条加速线路，一条不通换下一条",
-    "优化：下载改为断点续传，中断后从上次的位置继续，不再从 0 重新下 70 MB",
-    "优化：单条线路失败会先在原地重试一次再换线路，网络临时抖动不再导致整次更新作废",
-    "优化：下载超时判定改为「连续一段时间收不到数据」才算失败，慢速网络也能下完（此前有 10 分钟总时长硬限制）",
-    "新增：更新过程写入程序目录下的 update.log，检查、下载、替换每一步都有记录，出问题可直接查看原因",
-    "新增：版本清单支持配置多条下载地址（exeUrls），镜像与官方直链可同时列出，客户端自动择优"
+    "修复：自动适配时窗口标题栏会被顶到屏幕外（只开一个 16:9 窗口时必然出现），最小化/关闭按钮点不到、窗口也拖不回来——现在排列前会先给标题栏和边框预留空间",
+    "修复：排列完成后增加兜底，任何窗口只要超出工作区就整体挪回来（只挪不缩，尺寸和比例都不受影响）",
+    "修复：升级后残留的 Nightforge_old.exe（约 67 MB）以前只在特定方式启动时才清理，现在每次启动都会顺手清掉",
+    "修复：自动下载全部线路都失败时界面上毫无反应，现在会弹窗说明原因，可直接打开下载页，也可让它按断点继续重试"
   ]
 }

@@ -28,6 +28,9 @@ public partial class MainWindow : Window
     private bool _downloadingUpdate;
     private DispatcherTimer? _updateTimer;
 
+    /// <summary>本次运行里已经提醒过「下载失败」的版本号，避免每 6 小时检查一次就弹一次窗。</summary>
+    private readonly HashSet<string> _downloadFailNotified = new(StringComparer.OrdinalIgnoreCase);
+
     public MainWindow()
     {
         InitializeComponent();
@@ -453,13 +456,29 @@ public partial class MainWindow : Window
         bool resize = cfg.ResMode != "不改变窗口大小";
         int gap = cfg.WindowGap;
 
+        // 客户区可用范围：先把标题栏和边框占的空间扣掉再算。
+        // 否则单个 16:9 窗口会被算成「高度正好等于整个工作区」，标题栏顶到屏幕外，
+        // 最小化 / 关闭按钮都点不到，窗口也没法用手拖回来。
+        WindowService.WindowFrame frame = _windows.MeasureFrame(windows);
+        var clientArea = new WindowService.WorkArea(
+            area.Left + Math.Max(0, frame.OffsetX),
+            area.Top + Math.Max(0, frame.OffsetY),
+            Math.Max(LayoutCalculator.MinWindowWidth, area.Width - Math.Max(0, frame.ExtraWidth)),
+            Math.Max(LayoutCalculator.MinWindowHeight, area.Height - Math.Max(0, frame.ExtraHeight)));
+
+        if (frame.ExtraHeight > 0 || frame.ExtraWidth > 0)
+        {
+            _log.Add($"已为窗口标题栏与边框预留空间（{frame.ExtraWidth} × {frame.ExtraHeight}），"
+                     + $"客户区可用 {clientArea.Width}×{clientArea.Height}。");
+        }
+
         LayoutPlan plan;
         string modeText;
 
         if (cfg.ResMode == "自动适配（按比例）")
         {
             plan = LayoutCalculator.AutoFit(
-                windows.Count, area.Left, area.Top, area.Width, area.Height,
+                windows.Count, clientArea.Left, clientArea.Top, clientArea.Width, clientArea.Height,
                 ratio.RatioW, ratio.RatioH, gap);
             modeText = $"自动适配 · {ratio.Name}";
         }
@@ -467,7 +486,7 @@ public partial class MainWindow : Window
         {
             (int width, int height) = LargestClientSize(windows);
             plan = LayoutCalculator.Fixed(
-                windows.Count, area.Left, area.Top, area.Width, area.Height, width, height, gap);
+                windows.Count, clientArea.Left, clientArea.Top, clientArea.Width, clientArea.Height, width, height, gap);
             modeText = $"保持原大小 {width}×{height}";
         }
         else
@@ -486,7 +505,7 @@ public partial class MainWindow : Window
             }
 
             plan = LayoutCalculator.Fixed(
-                windows.Count, area.Left, area.Top, area.Width, area.Height, width, height, gap);
+                windows.Count, clientArea.Left, clientArea.Top, clientArea.Width, clientArea.Height, width, height, gap);
             modeText = $"固定 {width}×{height}";
         }
 
@@ -496,11 +515,11 @@ public partial class MainWindow : Window
             return;
         }
 
-        int moved = _windows.ApplyLayout(windows, plan, resize);
+        int moved = _windows.ApplyLayout(windows, plan, resize, area);
         _log.Add($"排列完成（{modeText}，{plan.Columns} 列 × {plan.Rows} 行，"
                  + $"每窗口客户区 {plan.WindowWidth}×{plan.WindowHeight}，成功 {moved} / {windows.Count} 个）。");
 
-        WarnIfCrowded(plan, area, windows.Count, ratio, gap);
+        WarnIfCrowded(plan, clientArea, windows.Count, ratio, gap);
     }
 
     /// <summary>
@@ -1009,6 +1028,10 @@ public partial class MainWindow : Window
                 {
                     ShowManualUpdateDialog(info, current);
                 }
+                else
+                {
+                    NotifyDownloadFailed(info, current, error);
+                }
 
                 return;
             }
@@ -1037,6 +1060,30 @@ public partial class MainWindow : Window
         finally
         {
             _downloadingUpdate = false;
+        }
+    }
+
+    /// <summary>
+    /// 静默更新下载失败时主动告知。以前只写日志，用户看到的现象是「说有新版本，然后没动静了」。
+    /// 同一个版本本次运行只提示一次，选「是」直接打开下载页，选「否」等下次自动重试（会接着续传）。
+    /// </summary>
+    private void NotifyDownloadFailed(UpdateInfo info, string current, string error)
+    {
+        if (!IsVisible || !_downloadFailNotified.Add(info.Version))
+        {
+            return;
+        }
+
+        MessageBoxResult choice = MessageBox.Show(
+            $"新版本 {info.Version} 已发布（当前 {current}），但自动下载没有成功。\n\n"
+            + $"原因：{error}\n\n"
+            + "下载会从上次中断的位置继续，下次启动或 6 小时后会自动重试。\n"
+            + "要现在打开下载页手动更新吗？",
+            "自动更新失败", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+
+        if (choice == MessageBoxResult.Yes)
+        {
+            UpdateWindow.OpenUrl(UpdateService.ReleasesUrl);
         }
     }
 

@@ -41,6 +41,13 @@ public partial class App : Application
             // 由旧版本拉起的新版本：后台清理上一版备份与 update 残留，不阻塞界面
             _ = System.Threading.Tasks.Task.Run(() => SilentUpdateService.CleanupOldFiles());
         }
+        else
+        {
+            // 每次正常启动也顺手清一次上次遗留的 Nightforge_old.exe：
+            // 旧进程退出慢的时候上一次可能没删掉，久留会白占几十 MB。
+            // 这里只删备份，不动 update 目录——那里可能有正在续传的分片。
+            _ = System.Threading.Tasks.Task.Run(() => SilentUpdateService.CleanupStaleBackups());
+        }
 
         var main = new MainWindow();
         MainWindow = main;

@@ -472,6 +472,71 @@ internal static class NativeMethods
         }
     };
 
+    // ---------- 剪贴板（粘贴兜底用） ----------
+    // 不引用 System.Windows.Clipboard：命令行探针没有 WPF，而且它要求 STA 线程。
+    // 直接走 Win32，任何线程都能用。
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool OpenClipboard(IntPtr hWndNewOwner);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool EmptyClipboard();
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SetClipboardData(uint uFormat, IntPtr hMem);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool CloseClipboard();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GlobalAlloc(uint uFlags, UIntPtr dwBytes);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GlobalLock(IntPtr hMem);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GlobalUnlock(IntPtr hMem);
+
+    /// <summary>把文字放进剪贴板（CF_UNICODETEXT）。成功返回 true。</summary>
+    public static bool SetClipboardText(string text)
+    {
+        const uint gmemMoveable = 0x0042;
+        const uint cfUnicodeText = 13;
+
+        if (!OpenClipboard(IntPtr.Zero))
+        {
+            return false;
+        }
+
+        try
+        {
+            EmptyClipboard();
+
+            byte[] bytes = Encoding.Unicode.GetBytes(text + "\0");
+            IntPtr memory = GlobalAlloc(gmemMoveable, (UIntPtr)bytes.Length);
+            if (memory == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            IntPtr target = GlobalLock(memory);
+            if (target == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            Marshal.Copy(bytes, 0, target, bytes.Length);
+            GlobalUnlock(memory);
+
+            // 成功之后这块内存归系统所有，不能再释放
+            return SetClipboardData(cfUnicodeText, memory) != IntPtr.Zero;
+        }
+        finally
+        {
+            CloseClipboard();
+        }
+    }
+
     /// <summary>清空输入框：Ctrl+A 全选 + Delete，再补一串退格（自绘框常常不理 Delete）。</summary>
     public static void ClearTextField()
     {

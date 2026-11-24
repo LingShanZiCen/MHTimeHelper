@@ -125,6 +125,7 @@ public sealed class AutoLoginService
 
         // 服务器搜索也只做一次：目标服不在列表里时用左上角搜索框搜出来
         bool serverSearched = false;
+        bool serverCardTried = false;
         TextLine? searchBoxAt = null;
 
         // 点击失败的确切原因（比如游戏卡死）。上层直接用它报错，别再说「没有反应」这种废话。
@@ -387,10 +388,20 @@ public sealed class AutoLoginService
 
             // 2.5) 服务器列表页上没看到目标服：这一屏默认只列当前分区的几个服，
             //      目标服在别的区就很正常。左上角有搜索框，搜出来再点。
-            if (!serverSearched && found.Search is not null && serverLine is null && server.Length > 0)
+            if (!serverSearched && server.Length > 0 && serverLine is null && found.IsServerList)
             {
                 serverSearched = true;
                 searchBoxAt = found.Search;
+
+                if (found.Search is null)
+                {
+                    // 确定是服务器列表，但认不出左上角那个搜索框。
+                    // 这一屏绝不能去点「登录游戏」——那是「进上次的角色」，会跳过选服选角。
+                    string dump = SaveDebug(frame, "nightforge_server_page.bmp");
+                    return $"这一屏是服务器列表，但没找到左上角的搜索框，「{server}」也就搜不出来"
+                           + (dump.Length > 0 ? $"（画面已存到 {dump}，发我看一眼就能对上）" : "")
+                           + "。";
+                }
 
                 (bool searched, string? searchReason) =
                     await SearchServerAsync(clickTarget, server, found.Search, report, ct).ConfigureAwait(true);
@@ -417,6 +428,38 @@ public sealed class AutoLoginService
             // 4) 只有「登录游戏」、没有服务器名（还没选过服务器的启动页）
             if (serverButton is not null)
             {
+                // 下面的「登录游戏」是「进上次玩过的角色」：点它就跳过选服选角。
+                // 那一屏通常是「上次登录的服务器卡片 + 登录游戏」，卡片上写着别的服名，
+                // 点卡片才会展开完整服务器列表（有搜索框那一屏）。
+                // 实测窗口 3 点的就是卡片（42%,57%），点完列表才出来；窗口 1、2 点的是「登录游戏」，
+                // 结果直接进了上次的角色。
+                if (server.Length > 0 && serverLine is null)
+                {
+                    TextLine? card = FindServerCardAbove(lines, serverButton);
+
+                    if (card is not null && !serverCardTried)
+                    {
+                        serverCardTried = true;
+                        SaveDebug(frame, "nightforge_server_page.bmp");
+                        report($"这一屏是「上次登录的服务器」，先点卡片「{card.Text}」进完整服务器列表");
+
+                        if (!await ClickOnceAsync(card, $"服务器卡片「{card.Text}」", "server-card", 2500)
+                                .ConfigureAwait(true))
+                        {
+                            return fatalReason ?? "点服务器卡片没有反应";
+                        }
+
+                        continue;
+                    }
+
+                    string dump = SaveDebug(frame, "nightforge_server_page.bmp");
+                    return (card is null
+                               ? "这一屏只看到「登录游戏」，没看到上面的服务器卡片，"
+                               : "点了服务器卡片之后还是没出现完整的服务器列表，")
+                           + $"找不到「{server}」。没有点「登录游戏」——那是进上次玩过的角色，会跳过选服选角。"
+                           + (dump.Length > 0 ? $"（画面已存到 {dump}，发我一眼就能对上。）" : "");
+                }
+
                 if (!await ClickOnceAsync(serverButton, "登录游戏", "server-enter", 4500).ConfigureAwait(true))
                 {
                     return fatalReason ?? "「登录游戏」点了好几次都没有反应";
@@ -880,15 +923,10 @@ public sealed class AutoLoginService
         {
             report("输入框里没进字，改用粘贴");
 
-            bool pasted = false;
-            try
+            bool pasted = NativeMethods.SetClipboardText(server);
+            if (!pasted)
             {
-                System.Windows.Clipboard.SetText(server);
-                pasted = true;
-            }
-            catch (Exception ex)
-            {
-                report($"往剪贴板放文字失败：{ex.Message}");
+                report("往剪贴板放文字失败，跳过粘贴这条兜底");
             }
 
             if (pasted)
@@ -1662,17 +1700,21 @@ public sealed class AutoLoginService
         TextLine? Server,
         bool HasEmail,
         TextLine? LoginButton,
-        TextLine? Search)
+        TextLine? Search,
+        int ZoneTabs)
     {
         public bool Anything => Role is not null || Enter is not null || ServerButton is not null
                                 || SwitchAccount is not null || Account is not null || HasEmail
                                 || LoginButton is not null || Search is not null;
 
         /// <summary>
-        /// 服务器列表页（左上角有搜索框那一屏）。这一屏默认只列当前分区的几个服，
-        /// 目标服不在里面时得先用搜索框搜出来——不然会一直等，最后误判成「已进游戏」。
+        /// 服务器列表页（左边有「正式服 / 轻享服 / 已有角色 / 时空区 / 七区…」那一列分区按钮）。
+        /// 这一屏默认只列当前分区的几个服，目标服不在里面时得先用搜索框搜出来。
+        ///
+        /// 不能只凭搜索框判：实测搜索框是灰色小字，快通道根本认不出来（19 行里没有它），
+        /// 而「登录游戏」认得出——只认搜索框的话就会去点「登录游戏」，直接进上次的角色。
         /// </summary>
-        public bool IsServerList => Search is not null;
+        public bool IsServerList => Search is not null || ZoneTabs >= 2;
 
         /// <summary>
         /// 快速登录页（记住账号那一屏：邮箱 + 进入游戏 + 使用其他账号登录）。
@@ -1712,6 +1754,22 @@ public sealed class AutoLoginService
             if (retry.Role is not null || retry.Enter is not null || retry.ServerButton is not null
                 || retry.Server is not null || retry.SwitchAccount is not null
                 || retry.LoginButton is not null || retry.Search is not null)
+            {
+                lines = strong;
+                found = retry;
+            }
+        }
+
+        // 只认出「登录游戏」、没认出目标服务器：这一屏八成就是服务器列表（左上角那个灰色的
+        // 「搜索」只有加强通道认得出）。不补这一次，就会去点「登录游戏」——
+        // 那是「进上次的角色」，直接跳过选服选角（实测窗口 1、2 就这么进错的）。
+        if (found.ServerButton is not null && found.Server is null && found.Role is null
+            && found.Search is null && found.ZoneTabs == 0 && server.Length > 0)
+        {
+            List<TextLine> strong = await OcrService.RecognizeAsync(frame, thorough: true).ConfigureAwait(true);
+            Found retry = FindAll(strong, accountKey, server);
+
+            if (retry.Search is not null || retry.Server is not null || retry.ZoneTabs >= 2)
             {
                 lines = strong;
                 found = retry;
@@ -1815,7 +1873,8 @@ public sealed class AutoLoginService
             server.Length > 0 ? FindServerRow(lines, server, search) : null,
             lines.Any(l => l.Text.Contains('@')),
             FindLoginButton(lines),
-            search);
+            search,
+            lines.Count(l => IsZoneTab(l.Text)));
     }
 
     /// <summary>
@@ -1839,6 +1898,41 @@ public sealed class AutoLoginService
     }
 
     /// <summary>找「登录」按钮（快通道认不出深底白字时，调用方会换加强通道再算一遍）。</summary>
+    /// <summary>这一行是不是服务器列表页左边的分区按钮（正式服 / 轻享服 / 已有角色 / 七区…）。</summary>
+    private static bool IsZoneTab(string text)
+    {
+        string n = OcrService.Normalize(text);
+        if (n.Length is 0 or > 6)
+        {
+            return false;
+        }
+
+        if (n.Contains("正式服", StringComparison.Ordinal) || n.Contains("轻享服", StringComparison.Ordinal)
+            || n.Contains("已有角色", StringComparison.Ordinal) || n.Contains("新服推荐", StringComparison.Ordinal)
+            || n.Contains("时空区", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        // 「七区」「六区」这种：两个字，且以区结尾（OCR 常把「七」认成「乜」，所以不认第一个字）
+        return n.Length == 2 && n.EndsWith('区');
+    }
+
+    /// <summary>
+    /// 服务器页上「登录游戏」按钮正上方的那张服务器卡片（卡片上写着上次登录的服名）。
+    /// 点它才会展开完整的服务器列表——也就是有搜索框的那一屏。
+    /// </summary>
+    private static TextLine? FindServerCardAbove(List<TextLine> lines, TextLine serverButton)
+    {
+        return lines
+            .Where(l => l.CenterY < serverButton.CenterY - 6 && l.CenterY > serverButton.CenterY - 24)
+            .Where(l => Math.Abs(l.CenterX - serverButton.CenterX) < 24)
+            .Where(l => OcrService.Normalize(l.Text) is { Length: >= 2 and <= 12 })
+            .Where(l => !OcrService.Normalize(l.Text).Contains("登录", StringComparison.Ordinal))
+            .OrderByDescending(l => l.CenterY)
+            .FirstOrDefault();
+    }
+
     /// <summary>
     /// 认目标服务器这一行。
     ///

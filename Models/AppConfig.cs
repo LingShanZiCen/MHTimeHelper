@@ -39,6 +39,15 @@ public sealed class AppConfig
     /// <summary>发现新版本时后台自动下载，下次启动自动换成新版；关闭则只提示、由用户手动下载。</summary>
     public bool AutoDownloadUpdate { get; set; } = true;
 
+    /// <summary>
+    /// 给游戏窗口标题加 ①~⑤ 序号（按屏幕位置排，① 在左上），
+    /// 同时把 Ctrl+Alt+1~5 注册成「直达对应窗口」。
+    /// </summary>
+    public bool NumberCaptions { get; set; } = true;
+
+    /// <summary>窗口数量少于启动数量时自动补开（掉线、闪退补位）。默认关闭，避免误判后反复弹窗。</summary>
+    public bool AutoRevive { get; set; }
+
     /// <summary>已下载完成、等待重启替换的版本号（空表示没有待应用的更新）。</summary>
     public string PendingUpdateVersion { get; set; } = "";
 
@@ -50,6 +59,9 @@ public sealed class AppConfig
     public string HotkeyFront { get; set; } = "Ctrl+Alt+T";
     public string HotkeyMinimize { get; set; } = "Ctrl+Alt+B";
     public string HotkeyGetSize { get; set; } = "Ctrl+Alt+S";
+
+    /// <summary>不重启游戏，把已开的窗口按布局重新摆一遍。</summary>
+    public string HotkeyArrange { get; set; } = "Ctrl+Alt+G";
 
     public AppConfig Clone() => (AppConfig)MemberwiseClone();
 

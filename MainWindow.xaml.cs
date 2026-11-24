@@ -18,6 +18,7 @@ public partial class MainWindow : Window
     private readonly LogService _log = new();
     private readonly WindowService _windows;
     private readonly GameShutdownService _shutdown = new();
+    private readonly AudioService _audio = new();
     private HotkeyService? _hotkeys;
     private WinForms.NotifyIcon? _tray;
     private AppConfig _config = new();
@@ -27,6 +28,20 @@ public partial class MainWindow : Window
     private bool _checkingUpdate;
     private bool _downloadingUpdate;
     private DispatcherTimer? _updateTimer;
+
+    /// <summary>「声音」下拉框在初始化填充时会触发 SelectionChanged，填完之前不响应用户动作。</summary>
+    private bool _audioReady;
+
+    /// <summary>当前被本程序静音的进程，退出时一律恢复，免得留下没声音的游戏。</summary>
+    private readonly HashSet<uint> _mutedPids = [];
+
+    /// <summary>窗口监控（补开 + 序号修复）。</summary>
+    private DispatcherTimer? _monitorTimer;
+
+    /// <summary>是否处于「维持窗口数量」状态：点过一键启动或手动勾选后开启，一键退出后关闭。</summary>
+    private bool _reviveArmed;
+    private DateTime _lastReviveAt = DateTime.MinValue;
+    private int _reviveFailStreak;
 
     /// <summary>本次运行里已经提醒过「下载失败」的版本号，避免每 6 小时检查一次就弹一次窗。</summary>
     private readonly HashSet<string> _downloadFailNotified = new(StringComparer.OrdinalIgnoreCase);
@@ -49,12 +64,15 @@ public partial class MainWindow : Window
         CmbResMode.ItemsSource = AppConfig.ModeOptions;
         CmbResPreset.ItemsSource = AppConfig.PresetOptions;
         CmbAspect.ItemsSource = AspectRatioOption.All;
+        CmbAudio.ItemsSource = AudioModes;
 
         // 必须先读配置再注册：SourceInitialized 阶段文本框还是空的，会把空手势当成快捷键
         LoadConfigToUi();
+        _audioReady = true;
         SyncRatioFromGame(silent: true);
         InitHotkeys();
         InitTray();
+        InitMonitor();
         UpdateAdminBanner();
 
         TxtVersion.Text = $"v{UpdateService.CurrentVersionText}";
@@ -71,6 +89,75 @@ public partial class MainWindow : Window
         if (SilentUpdateService.HasPendingUpdate(_config))
         {
             _log.Add($"新版本 {_config.PendingUpdateVersion} 已下载完成，下次启动会自动替换（也可点「检查更新」重新确认）。");
+        }
+
+        _ = ClearStaleCaptionsAsync();
+    }
+
+    /// <summary>「声音」下拉框的选项：前两项是整体状态，后面按窗口序号单独保留。</summary>
+    private static readonly string[] AudioModes =
+    [
+        "全部有声", "全部静音", "只留 ①", "只留 ②", "只留 ③", "只留 ④", "只留 ⑤"
+    ];
+
+    /// <summary>
+    /// 上次异常退出（或本程序被强杀）会在游戏标题里留下「① 」这种前缀，
+    /// 启动时清一次，免得用户看到莫名其妙的序号。
+    /// </summary>
+    private async Task ClearStaleCaptionsAsync()
+    {
+        await Task.Delay(1500);
+        try
+        {
+            List<IntPtr> windows = RefreshWindows();
+            int cleared = CaptionService.ClearAll(windows);
+            if (cleared > 0)
+            {
+                _log.Add($"已清掉上次运行残留的窗口序号（{cleared} 个）。");
+            }
+        }
+        catch
+        {
+            // 清理失败不影响启动
+        }
+    }
+
+    /// <summary>窗口监控：① 游戏自己改了标题就补回序号；② 掉线/闪退后按需补开。</summary>
+    private void InitMonitor()
+    {
+        _monitorTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
+        _monitorTimer.Tick += async (_, _) => await OnMonitorTickAsync();
+        _monitorTimer.Start();
+    }
+
+    private async Task OnMonitorTickAsync()
+    {
+        if (_busy)
+        {
+            return;
+        }
+
+        try
+        {
+            List<IntPtr> windows = RefreshWindows();
+            if (windows.Count == 0)
+            {
+                return;
+            }
+
+            if (_config.NumberCaptions)
+            {
+                EnsureCaptions(windows);
+            }
+
+            if (_config.AutoRevive)
+            {
+                await CheckReviveAsync(windows);
+            }
+        }
+        catch
+        {
+            // 监控是后台心跳，出错不该影响界面
         }
     }
 
@@ -219,12 +306,14 @@ public partial class MainWindow : Window
         _config = ConfigService.Load();
 
         // 不再支持 Win 组合：旧配置里的 Win 热键会导致启动即注册失败，一次性迁移为新默认值并落盘
-        if (HasWinModifier(_config.HotkeyFront) || HasWinModifier(_config.HotkeyMinimize) || HasWinModifier(_config.HotkeyGetSize))
+        if (HasWinModifier(_config.HotkeyFront) || HasWinModifier(_config.HotkeyMinimize)
+            || HasWinModifier(_config.HotkeyGetSize) || HasWinModifier(_config.HotkeyArrange))
         {
             var defaults = new AppConfig();
             if (HasWinModifier(_config.HotkeyFront)) _config.HotkeyFront = defaults.HotkeyFront;
             if (HasWinModifier(_config.HotkeyMinimize)) _config.HotkeyMinimize = defaults.HotkeyMinimize;
             if (HasWinModifier(_config.HotkeyGetSize)) _config.HotkeyGetSize = defaults.HotkeyGetSize;
+            if (HasWinModifier(_config.HotkeyArrange)) _config.HotkeyArrange = defaults.HotkeyArrange;
             ConfigService.Save(_config);
             _log.Add($"旧配置中的 Win 组合已不再支持，已自动改为 {_config.HotkeyFront} / {_config.HotkeyMinimize} / {_config.HotkeyGetSize}。");
         }
@@ -243,6 +332,10 @@ public partial class MainWindow : Window
         TxtHotkeyFront.Text = _config.HotkeyFront;
         TxtHotkeyMinimize.Text = _config.HotkeyMinimize;
         TxtHotkeyGetSize.Text = _config.HotkeyGetSize;
+        TxtHotkeyArrange.Text = _config.HotkeyArrange;
+        ChkNumberCaptions.IsChecked = _config.NumberCaptions;
+        ChkAutoRevive.IsChecked = _config.AutoRevive;
+        CmbAudio.SelectedIndex = 0;
         ChkAutoUpdate.IsChecked = _config.CheckUpdateOnStart;
         ChkAutoDownload.IsChecked = _config.AutoDownloadUpdate;
 
@@ -267,6 +360,9 @@ public partial class MainWindow : Window
             HotkeyFront = TxtHotkeyFront.Text.Trim(),
             HotkeyMinimize = TxtHotkeyMinimize.Text.Trim(),
             HotkeyGetSize = TxtHotkeyGetSize.Text.Trim(),
+            HotkeyArrange = TxtHotkeyArrange.Text.Trim(),
+            NumberCaptions = ChkNumberCaptions.IsChecked == true,
+            AutoRevive = ChkAutoRevive.IsChecked == true,
             // 更新检查开关与「不再提示的版本」不属于界面收集项，按当前值透传，避免保存时被重置
             CheckUpdateOnStart = ChkAutoUpdate.IsChecked == true,
             SkipVersion = _config.SkipVersion,
@@ -326,6 +422,25 @@ public partial class MainWindow : Window
             allOk = false;
         }
 
+        if (!_hotkeys.Register(cfg.HotkeyArrange, () => RearrangeWindows("热键"), out string err4))
+        {
+            _log.Add(err4);
+            allOk = false;
+        }
+
+        // Ctrl+Alt+1~5 直达对应窗口，和标题序号是一套功能，关掉序号就一起释放
+        if (cfg.NumberCaptions)
+        {
+            for (int i = 1; i <= CaptionService.MaxIndex; i++)
+            {
+                int index = i;
+                if (!_hotkeys.Register($"Ctrl+Alt+{i}", () => FocusWindowByIndex(index), out string err))
+                {
+                    _log.Add(err);
+                }
+            }
+        }
+
         return allOk;
     }
 
@@ -340,6 +455,7 @@ public partial class MainWindow : Window
         {
             "Front" => TxtHotkeyFront.Text,
             "Minimize" => TxtHotkeyMinimize.Text,
+            "Arrange" => TxtHotkeyArrange.Text,
             _ => TxtHotkeyGetSize.Text
         };
 
@@ -369,6 +485,9 @@ public partial class MainWindow : Window
                         break;
                     case "Minimize":
                         TxtHotkeyMinimize.Text = captured;
+                        break;
+                    case "Arrange":
+                        TxtHotkeyArrange.Text = captured;
                         break;
                     default:
                         TxtHotkeyGetSize.Text = captured;
@@ -428,6 +547,10 @@ public partial class MainWindow : Window
 
             _log.Add($"共捕获 {_gameWindows.Count} 个窗口，开始排列...");
             ArrangeWindows(cfg, _gameWindows);
+
+            // 从这里开始进入「维持数量」状态：掉线一个就补一个（需在「多开辅助」里勾选）
+            _reviveArmed = true;
+            _reviveFailStreak = 0;
         }
         catch (Exception ex)
         {
@@ -520,6 +643,291 @@ public partial class MainWindow : Window
                  + $"每窗口客户区 {plan.WindowWidth}×{plan.WindowHeight}，成功 {moved} / {windows.Count} 个）。");
 
         WarnIfCrowded(plan, clientArea, windows.Count, ratio, gap);
+
+        // 摆好位置再编号：序号按屏幕位置算，这样 ① 就是左上角那个窗口
+        ApplyCaptions(cfg, windows);
+    }
+
+    /// <summary>
+    /// 不重启游戏，把已经在跑的窗口按当前布局重新摆一遍。
+    /// 挂机途中游戏自己改了分辨率、或者被手滑拖乱了，用它回到原位。
+    /// </summary>
+    private void OnArrangeClick(object sender, RoutedEventArgs e) => RearrangeWindows("按钮");
+
+    private void RearrangeWindows(string source)
+    {
+        if (_busy)
+        {
+            _log.Add("正在执行其它操作，请稍候再重新排列。");
+            return;
+        }
+
+        List<IntPtr> windows = RefreshWindows();
+        if (windows.Count == 0)
+        {
+            _log.Add($"重新排列（{source}）：没有找到匹配的窗口，请先启动游戏。");
+            return;
+        }
+
+        _log.AddSeparator();
+        _log.Add($"重新排列（{source}）：共 {windows.Count} 个窗口");
+
+        // 读界面上的最新设置，但不必落盘——用户可能只是想试试某个尺寸
+        AppConfig cfg = CollectConfig(persist: false);
+        _config = cfg;
+        ArrangeWindows(cfg, windows);
+    }
+
+    // ================= 窗口序号 =================
+
+    /// <summary>按屏幕位置给窗口标 ①~⑤；关掉开关时反过来把序号去掉。</summary>
+    private void ApplyCaptions(AppConfig cfg, IReadOnlyList<IntPtr> windows)
+    {
+        if (windows.Count == 0)
+        {
+            return;
+        }
+
+        if (!cfg.NumberCaptions)
+        {
+            int cleared = CaptionService.ClearAll(windows);
+            if (cleared > 0)
+            {
+                _log.Add($"已去掉 {cleared} 个窗口的标题序号。");
+            }
+
+            return;
+        }
+
+        List<IntPtr> ordered = WindowService.OrderByPosition(windows);
+        int ok = CaptionService.Apply(ordered);
+        if (ok > 0)
+        {
+            _log.Add($"窗口已按位置编号 ①~{CaptionService.MarkOf(Math.Min(ok, CaptionService.MaxIndex))}"
+                     + $"（① 在左上），Ctrl+Alt+数字 可直达。");
+        }
+    }
+
+    /// <summary>游戏重新设置标题后序号会丢，监控时静默补回来（不写日志，免得每 5 秒刷一条）。</summary>
+    private static void EnsureCaptions(IReadOnlyList<IntPtr> windows)
+    {
+        List<IntPtr> ordered = WindowService.OrderByPosition(windows);
+        bool missing = ordered.Any(hwnd => !CaptionService.HasMark(WindowService.GetTitle(hwnd)));
+        if (missing)
+        {
+            CaptionService.Apply(ordered);
+        }
+    }
+
+    /// <summary>Ctrl+Alt+1~5：跳到指定序号的窗口并置顶。</summary>
+    private void FocusWindowByIndex(int index)
+    {
+        List<IntPtr> ordered = WindowService.OrderByPosition(RefreshWindows());
+
+        if (ordered.Count == 0)
+        {
+            _log.Add($"直达 {CaptionService.MarkOf(index)} 号窗口：现在没有游戏窗口。");
+            return;
+        }
+
+        if (index > ordered.Count)
+        {
+            _log.Add($"直达 {CaptionService.MarkOf(index)} 号窗口：现在只开了 {ordered.Count} 个。");
+            return;
+        }
+
+        // 成功时不写日志：窗口已经切过去了，看见就是结果
+        if (!_windows.BringOne(ordered[index - 1]))
+        {
+            _log.Add($"直达 {CaptionService.MarkOf(index)} 号窗口：系统拒绝了置顶，再按一次通常就好。");
+        }
+    }
+
+    private void OnNumberCaptionsChanged(object sender, RoutedEventArgs e)
+    {
+        AppConfig cfg = CollectConfig();
+        _config = cfg;
+        RegisterHotkeys(cfg);
+
+        List<IntPtr> windows = RefreshWindows();
+        ApplyCaptions(cfg, windows);
+
+        _log.Add(cfg.NumberCaptions
+            ? "已开启窗口序号：Ctrl+Alt+1~5 直达对应窗口。"
+            : "已关闭窗口序号，Ctrl+Alt+1~5 直达热键也一并释放。");
+    }
+
+    // ================= 声音 =================
+
+    private void OnAudioModeChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_audioReady)
+        {
+            return;
+        }
+
+        ApplyAudioMode(CmbAudio.SelectedIndex);
+    }
+
+    private static uint PidOf(IntPtr hwnd)
+    {
+        NativeMethods.GetWindowThreadProcessId(hwnd, out uint pid);
+        return pid;
+    }
+
+    /// <summary>
+    /// 0 = 全部有声，1 = 全部静音，2~6 = 只留 ①~⑤。
+    /// 只动游戏进程的音频会话，浏览器、音乐播放器一概不碰。
+    /// </summary>
+    private void ApplyAudioMode(int mode)
+    {
+        List<IntPtr> ordered = WindowService.OrderByPosition(RefreshWindows());
+        if (ordered.Count == 0)
+        {
+            _log.Add("声音：现在没有游戏窗口，等游戏起来再选。");
+            return;
+        }
+
+        List<uint> pids = ordered.Select(PidOf).Where(p => p != 0).Distinct().ToList();
+        if (pids.Count == 0)
+        {
+            _log.Add("声音：读不到游戏进程号，没法调音量。");
+            return;
+        }
+
+        if (mode <= 0)
+        {
+            int n = _audio.SetMute(pids, false, out string msg);
+            _mutedPids.Clear();
+            _log.Add(n > 0
+                ? $"声音：{n} 个游戏会话已恢复有声。"
+                : $"声音：没找到可控制的游戏音频会话{(msg.Length > 0 ? $"（{msg}）" : string.Empty)}。");
+            return;
+        }
+
+        if (mode == 1)
+        {
+            int n = _audio.SetMute(pids, true, out string msg);
+            foreach (uint pid in pids)
+            {
+                _mutedPids.Add(pid);
+            }
+
+            _log.Add(n > 0
+                ? $"声音：{n} 个游戏会话已静音（系统音量不变）。"
+                : $"声音：没找到可控制的游戏音频会话{(msg.Length > 0 ? $"（{msg}）" : string.Empty)}。");
+            return;
+        }
+
+        int index = mode - 1;
+        if (index > ordered.Count)
+        {
+            _log.Add($"声音：现在只开了 {ordered.Count} 个窗口，没有 {CaptionService.MarkOf(index)} 号。");
+
+            // 下拉框回退，避免界面显示「只留 ③」而实际什么都没做
+            _audioReady = false;
+            CmbAudio.SelectedIndex = 0;
+            _audioReady = true;
+            return;
+        }
+
+        uint keep = PidOf(ordered[index - 1]);
+        _audio.SetMute(pids, true, out _);
+        _audio.SetMute([keep], false, out string keepMsg);
+
+        _mutedPids.Clear();
+        foreach (uint pid in pids.Where(p => p != keep))
+        {
+            _mutedPids.Add(pid);
+        }
+
+        _log.Add(keepMsg.Length > 0
+            ? $"声音：只留 {CaptionService.MarkOf(index)} 号有声失败（{keepMsg}）。"
+            : $"声音：只留 {CaptionService.MarkOf(index)} 号窗口有声，其余 {_mutedPids.Count} 个已静音。");
+    }
+
+    // ================= 掉线补开 =================
+
+    private void OnAutoReviveChanged(object sender, RoutedEventArgs e)
+    {
+        AppConfig cfg = CollectConfig();
+        _config = cfg;
+        _reviveFailStreak = 0;
+
+        if (cfg.AutoRevive)
+        {
+            // 勾上就先接管：之后只要窗口变少就补。窗口数为 0 时不补（那是还没启动，不是掉线）
+            _reviveArmed = true;
+            _log.Add("已开启掉线自动补开：窗口数量少于「启动数量」时会自动补一个并重排。");
+        }
+        else
+        {
+            _log.Add("已关闭掉线自动补开。");
+        }
+    }
+
+    /// <summary>
+    /// 窗口数量少于「启动数量」就补开。只在「已经有过窗口」时动手——
+    /// 一个窗口都没有说明游戏压根没启动，这时候补开会变成偷偷启动游戏。
+    /// </summary>
+    private async Task CheckReviveAsync(List<IntPtr> windows)
+    {
+        if (!_reviveArmed || _reviveFailStreak >= 3)
+        {
+            return;
+        }
+
+        int expected = Math.Clamp(_config.LastCount, 1, CaptionService.MaxIndex);
+        if (windows.Count >= expected)
+        {
+            _reviveFailStreak = 0;
+            return;
+        }
+
+        // 补开一次要跑几十秒，期间别重复触发
+        if (DateTime.Now - _lastReviveAt < TimeSpan.FromSeconds(25))
+        {
+            return;
+        }
+
+        if (_config.GamePath.Length == 0 || !File.Exists(_config.GamePath))
+        {
+            return;
+        }
+
+        int gap = expected - windows.Count;
+        _lastReviveAt = DateTime.Now;
+        _busy = true;
+        try
+        {
+            _log.Add($"检测到只剩 {windows.Count} / {expected} 个窗口，自动补开 {gap} 个…");
+
+            List<IntPtr> added = await _windows.LaunchMultipleAsync(
+                _config.GamePath, _config.WinTitle, gap, _config.WaitSec, _log.Add, CancellationToken.None);
+
+            if (added.Count == 0)
+            {
+                _reviveFailStreak++;
+                _log.Add(_reviveFailStreak >= 3
+                    ? "连着 3 次没补上，自动补开已暂停。多半是游戏检测到已有实例、只把旧窗口切到前台；关掉开关手动开一个即可。"
+                    : $"这次没补上（{_reviveFailStreak} / 3），稍后会自动再试。");
+                return;
+            }
+
+            _reviveFailStreak = 0;
+            _gameWindows = RefreshWindows();
+            _log.Add($"已补开 {added.Count} 个窗口，重新排列…");
+            ArrangeWindows(_config, _gameWindows);
+        }
+        catch (Exception ex)
+        {
+            _reviveFailStreak++;
+            _log.Add($"自动补开出错：{ex.Message}");
+        }
+        finally
+        {
+            _busy = false;
+        }
     }
 
     /// <summary>
@@ -649,6 +1057,8 @@ public partial class MainWindow : Window
             return;
         }
 
+        // 主动退出全部窗口，就别再自动补开了，否则刚退完又给你开回来
+        _reviveArmed = false;
         _busy = true;
         try
         {
@@ -765,6 +1175,7 @@ public partial class MainWindow : Window
         CheckHotkey("前置全部窗口", TxtHotkeyFront.Text, problems);
         CheckHotkey("老板键（最小化）", TxtHotkeyMinimize.Text, problems);
         CheckHotkey("获取窗口大小", TxtHotkeyGetSize.Text, problems);
+        CheckHotkey("重新排列", TxtHotkeyArrange.Text, problems);
 
         if (problems.Count > 0)
         {
@@ -1327,6 +1738,37 @@ public partial class MainWindow : Window
             _tray.Visible = false;
             _tray.Dispose();
             _tray = null;
+        }
+
+        _monitorTimer?.Stop();
+
+        // 退出前收拾干净：标题里的序号去掉、静音过的游戏恢复有声。
+        // 不做的话，下次不启动本程序时窗口会一直挂着「① 梦幻西游」，或者游戏一直没声音。
+        try
+        {
+            IReadOnlyList<IntPtr> known = _gameWindows.Count > 0 ? _gameWindows : RefreshWindows();
+            int cleared = CaptionService.ClearAll(known);
+            if (cleared > 0)
+            {
+                _log.Add($"已去掉 {cleared} 个窗口的标题序号。");
+            }
+        }
+        catch
+        {
+            // 清理失败不影响退出
+        }
+
+        try
+        {
+            if (_mutedPids.Count > 0)
+            {
+                _audio.SetMute(_mutedPids.ToList(), false, out _);
+                _mutedPids.Clear();
+            }
+        }
+        catch
+        {
+            // 音频恢复失败不影响退出
         }
 
         _reallyExit = true;

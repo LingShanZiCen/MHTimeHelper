@@ -243,6 +243,42 @@
                             </StackPanel>
                         </Border>
 
+                        <!-- 多开辅助 -->
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,14">
+                                    <Border Width="3" Height="13" CornerRadius="2"
+                                            Background="{StaticResource AccentGradient}" VerticalAlignment="Center" />
+                                    <TextBlock Text="多开辅助" Style="{StaticResource SectionTitle}" Margin="9,0,0,0" />
+                                </StackPanel>
+
+                                <CheckBox x:Name="ChkNumberCaptions" Style="{StaticResource OptionCheck}"
+                                          Content="窗口标题加 ①~⑤ 序号（Ctrl+Alt+1~5 直达）" Margin="0,0,0,5"
+                                          ToolTip="序号按屏幕位置排，① 在左上。取消勾选会立即去掉已经加上的序号"
+                                          Click="OnNumberCaptionsChanged" />
+                                <TextBlock Style="{StaticResource Hint}" Margin="22,0,0,13" TextWrapping="Wrap"
+                                           Text="五开时从任务栏一眼看出哪个是几号；按 Ctrl+Alt+数字 直接跳到那个窗口，比 Alt+Tab 靠谱。" />
+
+                                <Grid Margin="0,0,0,13">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="104" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="声音" Style="{StaticResource FieldLabel}" />
+                                    <ComboBox Grid.Column="1" x:Name="CmbAudio" Style="{StaticResource Dropdown}"
+                                              Width="196" HorizontalAlignment="Left"
+                                              SelectionChanged="OnAudioModeChanged"
+                                              ToolTip="只控制游戏自己的声音，浏览器和音乐播放器不受影响" />
+                                </Grid>
+
+                                <CheckBox x:Name="ChkAutoRevive" Style="{StaticResource OptionCheck}"
+                                          Content="掉线 / 闪退后自动补开" Margin="0,0,0,5"
+                                          Click="OnAutoReviveChanged" />
+                                <TextBlock Style="{StaticResource Hint}" Margin="22,0,0,0" TextWrapping="Wrap"
+                                           Text="窗口数量少于「启动数量」时自动补开一个并重新排列；点「一键退出游戏」后自动停用。" />
+                            </StackPanel>
+                        </Border>
+
                         <!-- 热键 -->
                         <Border Style="{StaticResource Card}">
                             <StackPanel>
@@ -259,6 +295,7 @@
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
                                     <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
                                         <RowDefinition Height="Auto" />
                                         <RowDefinition Height="Auto" />
                                         <RowDefinition Height="Auto" />
@@ -284,6 +321,13 @@
                                              ToolTip="可直接输入，如 Ctrl+Alt+S；也可点右侧「设置」按钮按键录制" />
                                     <Button Grid.Row="2" Grid.Column="2" Content="设置" Style="{StaticResource SmallButton}"
                                             Margin="0,0,0,11" Tag="GetSize" Click="OnSetHotkeyClick" />
+
+                                    <TextBlock Grid.Row="3" Grid.Column="0" Text="重新排列" Style="{StaticResource FieldLabel}" Margin="0,0,0,11" />
+                                    <TextBox Grid.Row="3" Grid.Column="1" x:Name="TxtHotkeyArrange" Style="{StaticResource InputBox}"
+                                             Margin="0,0,8,11"
+                                             ToolTip="不重启游戏，把已开的窗口按布局重新摆一遍" />
+                                    <Button Grid.Row="3" Grid.Column="2" Content="设置" Style="{StaticResource SmallButton}"
+                                            Margin="0,0,0,11" Tag="Arrange" Click="OnSetHotkeyClick" />
                                 </Grid>
                             </StackPanel>
                         </Border>
@@ -318,6 +362,8 @@
                 <StackPanel Grid.Row="3">
                     <WrapPanel Margin="0,0,0,9">
                         <Button Content="一键启动" Style="{StaticResource PrimaryButton}" MinWidth="112" Click="OnLaunchClick" />
+                        <Button Content="重新排列" Style="{StaticResource SecondaryButton}" MinWidth="96" Click="OnArrangeClick"
+                                ToolTip="不关游戏，把已开的窗口按当前布局重新摆一遍（拖乱、游戏自己改了尺寸都用它）" />
                         <Button Content="前置全部" Style="{StaticResource SecondaryButton}" Click="OnBringAllClick" />
                         <Button Content="一键退出游戏" Style="{StaticResource DangerButton}" Click="OnShutdownGamesClick" />
                         <Button Content="老板键" Style="{StaticResource SecondaryButton}" MinWidth="76" Click="OnBossKeyClick" />

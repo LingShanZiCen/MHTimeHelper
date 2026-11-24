@@ -385,6 +385,87 @@ public sealed class WindowService
         Thread.Sleep(20);
     }
 
+    /// <summary>把单个窗口恢复并置顶（配合 Ctrl+Alt+1~5 直达用）。</summary>
+    public bool BringOne(IntPtr hwnd)
+    {
+        if (!NativeMethods.IsWindow(hwnd))
+        {
+            return false;
+        }
+
+        if (NativeMethods.IsIconic(hwnd))
+        {
+            NativeMethods.ShowWindow(hwnd, NativeMethods.SW_RESTORE);
+        }
+
+        NativeMethods.ShowWindow(hwnd, NativeMethods.SW_SHOW);
+
+        // 后台进程直接调 SetForegroundWindow 常被系统拒绝，先把输入队列挂到自己线程上再试
+        uint foregroundThread = NativeMethods.GetWindowThreadProcessId(
+            NativeMethods.GetForegroundWindow(), out _);
+        uint selfThread = NativeMethods.GetCurrentThreadId();
+
+        bool attached = foregroundThread != 0 && foregroundThread != selfThread
+                        && NativeMethods.AttachThreadInput(foregroundThread, selfThread, true);
+        try
+        {
+            NativeMethods.BringWindowToTop(hwnd);
+            return NativeMethods.SetForegroundWindow(hwnd);
+        }
+        finally
+        {
+            if (attached)
+            {
+                NativeMethods.AttachThreadInput(foregroundThread, selfThread, false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// 按窗口在屏幕上的位置排序：先从上到下分行，行内从左到右。
+    /// 这样序号就和「屏幕上第几个格子」对应，① 永远在左上。
+    /// </summary>
+    public static List<IntPtr> OrderByPosition(IReadOnlyList<IntPtr> windows)
+    {
+        var items = new List<(IntPtr Hwnd, NativeMethods.RECT R)>();
+        foreach (IntPtr hwnd in windows)
+        {
+            if (NativeMethods.IsWindow(hwnd) && NativeMethods.GetWindowRect(hwnd, out NativeMethods.RECT rc))
+            {
+                items.Add((hwnd, rc));
+            }
+        }
+
+        if (items.Count <= 1)
+        {
+            return items.Select(i => i.Hwnd).ToList();
+        }
+
+        // 同一行的判定容差：窗口高度的一半（五点布局上下行中心至少差一整个窗口高）
+        int rowHeight = items.Max(i => i.R.Bottom - i.R.Top);
+        int tolerance = Math.Max(24, rowHeight / 2);
+
+        var rows = new List<List<(IntPtr Hwnd, NativeMethods.RECT R)>>();
+        foreach (var item in items.OrderBy(i => (i.R.Top + i.R.Bottom) / 2))
+        {
+            int center = (item.R.Top + item.R.Bottom) / 2;
+            List<(IntPtr Hwnd, NativeMethods.RECT R)>? last = rows.LastOrDefault();
+            if (last is not null)
+            {
+                int lastCenter = (last[0].R.Top + last[0].R.Bottom) / 2;
+                if (Math.Abs(center - lastCenter) <= tolerance)
+                {
+                    last.Add(item);
+                    continue;
+                }
+            }
+
+            rows.Add([item]);
+        }
+
+        return rows.SelectMany(row => row.OrderBy(i => i.R.Left).Select(i => i.Hwnd)).ToList();
+    }
+
     /// <summary>把全部游戏窗口恢复并逐一前置。</summary>
     public int BringAllToFront(IReadOnlyList<IntPtr> windows)
     {

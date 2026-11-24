@@ -48,10 +48,13 @@ public static class ConfigService
         cfg.AutoDownloadUpdate = GetInt(SettingsSection, "AutoDownloadUpdate", cfg.AutoDownloadUpdate ? 1 : 0, path) != 0;
         cfg.PendingUpdateVersion = GetString(SettingsSection, "PendingUpdateVersion", cfg.PendingUpdateVersion, path);
         cfg.PendingUpdateFile = GetString(SettingsSection, "PendingUpdateFile", cfg.PendingUpdateFile, path);
+        cfg.NumberCaptions = GetInt(SettingsSection, "NumberCaptions", cfg.NumberCaptions ? 1 : 0, path) != 0;
+        cfg.AutoRevive = GetInt(SettingsSection, "AutoRevive", cfg.AutoRevive ? 1 : 0, path) != 0;
 
         cfg.HotkeyFront = GetString(HotkeysSection, "Front", cfg.HotkeyFront, path);
         cfg.HotkeyMinimize = GetString(HotkeysSection, "Minimize", cfg.HotkeyMinimize, path);
         cfg.HotkeyGetSize = GetString(HotkeysSection, "GetSize", cfg.HotkeyGetSize, path);
+        cfg.HotkeyArrange = GetString(HotkeysSection, "Arrange", cfg.HotkeyArrange, path);
 
         if (cfg.LastCount < 1) cfg.LastCount = 1;
         if (cfg.LastCount > 5) cfg.LastCount = 5;
@@ -87,10 +90,13 @@ public static class ConfigService
         WriteString(SettingsSection, "AutoDownloadUpdate", cfg.AutoDownloadUpdate ? "1" : "0", path);
         WriteString(SettingsSection, "PendingUpdateVersion", cfg.PendingUpdateVersion, path);
         WriteString(SettingsSection, "PendingUpdateFile", cfg.PendingUpdateFile, path);
+        WriteString(SettingsSection, "NumberCaptions", cfg.NumberCaptions ? "1" : "0", path);
+        WriteString(SettingsSection, "AutoRevive", cfg.AutoRevive ? "1" : "0", path);
 
         WriteString(HotkeysSection, "Front", cfg.HotkeyFront, path);
         WriteString(HotkeysSection, "Minimize", cfg.HotkeyMinimize, path);
         WriteString(HotkeysSection, "GetSize", cfg.HotkeyGetSize, path);
+        WriteString(HotkeysSection, "Arrange", cfg.HotkeyArrange, path);
     }
 
     private static string GetString(string section, string key, string fallback, string path)

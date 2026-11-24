@@ -13,6 +13,14 @@ namespace Nightforge.Services;
 /// </summary>
 public sealed class AutoLoginService
 {
+    /// <summary>
+    /// 角色名的近似匹配门槛。
+    /// 角色名是彩色描边艺术字，「甜柚」实测会被认成「甜桩。」——只对上一个字，相似度 0.5。
+    /// 所以不能要求 0.68，得放宽；但配对时只比「点击登录」正上方那一行，
+    /// 不会跨卡片乱点，放宽也不至于进错号。
+    /// </summary>
+    private const double FuzzyRoleThreshold = 0.45;
+
     /// <summary>游戏内界面的典型按钮。认出几个就说明不是在登录流程里了。</summary>
     private static readonly string[] GameUiKeywords =
         ["包裹", "师门", "队伍", "好友", "骑乘", "技能", "商城", "排行", "挂机"];
@@ -614,6 +622,8 @@ public sealed class AutoLoginService
     {
         DateTime deadline = DateTime.Now.AddSeconds(Math.Max(1, timeoutSec));
         bool saidWaiting = false;
+        string? fuzzyProblem = null;
+        List<string> seenNames = [];
 
         while (DateTime.Now <= deadline)
         {
@@ -626,58 +636,85 @@ public sealed class AutoLoginService
                 continue;
             }
 
-            List<TextLine> lines = await OcrService.RecognizeAsync(frame.Value).ConfigureAwait(true);
-            TextLine? role = FindBest(lines, character);
-            if (role is null)
-            {
-                // 角色名偶尔是浅底深字排在角色卡片里，慢通道能多认一些
-                lines = await OcrService.RecognizeAsync(frame.Value, thorough: true).ConfigureAwait(true);
-                role = FindBest(lines, character);
-            }
+            // 角色页的名字和「点击登录」都是彩色描边字，只有加强通道认得出，直接走加强通道
+            List<TextLine> lines = await OcrService.RecognizeAsync(frame.Value, thorough: true)
+                .ConfigureAwait(true);
 
-            if (role is null)
+            seenNames = lines
+                .Where(line => line.Text.Length > 0)
+                .Select(line => line.Text)
+                .ToList();
+
+            // 1) 名字认对了就直连，最稳
+            TextLine? role = FindBest(lines, character);
+            if (role is not null)
             {
-                if (!saidWaiting)
+                TextLine? button = FindNearest(lines, role, "点击登录");
+                if (button is not null)
                 {
-                    saidWaiting = true;
-                    report($"等角色「{character}」出现…");
+                    await ClickLineAsync(hwnd, button, $"角色「{character}」下方的点击登录", report, ct)
+                        .ConfigureAwait(true);
+                    await Task.Delay(700, ct).ConfigureAwait(true);
+                    return (true, null);
                 }
 
-                await Task.Delay(PollIntervalMs, ct).ConfigureAwait(true);
-                continue;
+                // 没看到按钮：可能是选中态才有，先点一下名字，再看有没有冒出来
+                report($"找到角色「{character}」，但没看到它的「点击登录」，先点名字试试。");
+                await ClickLineAsync(hwnd, role, $"角色「{character}」", report, ct).ConfigureAwait(true);
+                await Task.Delay(900, ct).ConfigureAwait(true);
+
+                ScreenCapturer.Frame? after = ScreenCapturer.Capture(hwnd);
+                if (after is not null)
+                {
+                    List<TextLine> again = await OcrService.RecognizeAsync(after.Value).ConfigureAwait(true);
+                    TextLine? button2 = FindNearest(again, role, "点击登录");
+                    if (button2 is not null)
+                    {
+                        await ClickLineAsync(hwnd, button2, "点击登录", report, ct).ConfigureAwait(true);
+                        await Task.Delay(700, ct).ConfigureAwait(true);
+                    }
+                }
+
+                return (true, null);
             }
 
-            TextLine? button = FindNearest(lines, role, "点击登录");
-            if (button is not null)
+            // 2) 名字认不全（「甜柚」实测被认成「甜桩。」）：按「点击登录」+ 正上方名字配对
+            (TextLine? fuzzyButton, string? recognizedName, double score, string? problem) =
+                FindRoleButtonFuzzy(lines, character);
+
+            if (problem is not null)
             {
-                await ClickLineAsync(hwnd, button, $"角色「{character}」下方的点击登录", report, ct)
+                fuzzyProblem = problem;
+            }
+            else if (fuzzyButton is not null)
+            {
+                report($"按近似名字认出了角色「{recognizedName}」（与「{character}」相似度 {score:P0}），点它下面的「点击登录」");
+                await ClickLineAsync(hwnd, fuzzyButton, $"角色「{character}」下方的点击登录", report, ct)
                     .ConfigureAwait(true);
                 await Task.Delay(700, ct).ConfigureAwait(true);
                 return (true, null);
             }
 
-            // 没看到按钮：可能是选中态才有，先点一下名字，再看有没有冒出来
-            report($"找到角色「{character}」，但没看到它的「点击登录」，先点名字试试。");
-            await ClickLineAsync(hwnd, role, $"角色「{character}」", report, ct).ConfigureAwait(true);
-            await Task.Delay(900, ct).ConfigureAwait(true);
-
-            ScreenCapturer.Frame? after = ScreenCapturer.Capture(hwnd);
-            if (after is not null)
+            if (!saidWaiting)
             {
-                List<TextLine> again = await OcrService.RecognizeAsync(after.Value).ConfigureAwait(true);
-                TextLine? button2 = FindNearest(again, role, "点击登录");
-                if (button2 is not null)
-                {
-                    await ClickLineAsync(hwnd, button2, "点击登录", report, ct).ConfigureAwait(true);
-                    await Task.Delay(700, ct).ConfigureAwait(true);
-                }
+                saidWaiting = true;
+                report($"等角色「{character}」出现…");
             }
 
-            return (true, null);
+            await Task.Delay(PollIntervalMs, ct).ConfigureAwait(true);
         }
 
-        return (false, $"没找到角色「{character}」，可把名字缩短一点（比如只填两个字）；"
-                       + "也可能是还没进到角色列表——把服务器名也填上，服务器页要点服务器名字才会列出角色");
+        if (fuzzyProblem is not null)
+        {
+            return (false, fuzzyProblem);
+        }
+
+        string hint = seenNames.Count > 0
+            ? $"这一屏认到的文字里最像的名字是「{string.Join("」「", seenNames.Where(n => n.Length <= 10).Take(6))}」，"
+            : "";
+
+        return (false, $"没找到角色「{character}」。{hint}"
+                       + "可以把角色名填成卡片上显示的名字；如果这一屏还没有角色卡片，说明还没进到选角色界面。");
     }
 
     private async Task ClickLineAsync(
@@ -780,6 +817,20 @@ public sealed class AutoLoginService
             }
         }
 
+        // 服务器名认出来了、角色按钮没认出来：这一屏很可能是「服务器列表 + 角色列表」合在一起，
+        // 而「点击登录」是彩色字，只有加强通道认得出。不补这一次，就会把角色页当成服务器页、
+        // 再点一遍服务器名（实测就是这样把已经展开的角色列表又点回去了）。
+        if (found.Server is not null && found.Role is null && !found.IsAccountScreen)
+        {
+            List<TextLine> strong = await OcrService.RecognizeAsync(frame, thorough: true).ConfigureAwait(true);
+            Found retry = FindAll(strong, accountKey, server);
+            if (retry.Role is not null)
+            {
+                lines = strong;
+                found = retry;
+            }
+        }
+
         // 账号页的「进入游戏」是白字深底，快通道经常认不出来（只认得出上面的邮箱）。
         // 既然已经确定停在这一屏，就换加强通道把它找准——总比按位置瞎点稳妥。
         if (found.IsAccountScreen && found.Enter is null)
@@ -845,6 +896,108 @@ public sealed class AutoLoginService
             accountKey.Length > 0 ? FindBest(lines, accountKey) : null,
             server.Length > 0 ? FindBest(lines, server) : null,
             lines.Any(l => l.Text.Contains('@')));
+
+    /// <summary>
+    /// 按近似角色名找它的「点击登录」。
+    ///
+    /// 角色名是艺术字，认错一两个字是常态（「甜柚」→「甜桩。」）。所以不要求名字完全对上，
+    /// 而是以每个「点击登录」为锚点、取它正上方那一行名字来比：相似度最高的那个按钮才算数。
+    /// 好处是认错一个字也能选中，同时绝不会点到隔壁角色的按钮。
+    /// </summary>
+    public static (TextLine? Button, string? Name, double Score, string? Problem) FindRoleButtonFuzzy(
+        IReadOnlyList<TextLine> lines,
+        string character)
+    {
+        string target = OcrService.Normalize(character);
+        if (target.Length == 0)
+        {
+            return (null, null, 0, null);
+        }
+
+        string[] words = ["点击登录"];
+        List<TextLine> buttons = lines
+            .Where(line => words.Any(w => OcrService.Similarity(OcrService.Normalize(line.Text), w) >= 0.68))
+            .ToList();
+
+        if (buttons.Count == 0)
+        {
+            return (null, null, 0, null);
+        }
+
+        List<(TextLine Button, TextLine? Name, double Score)> scored = buttons
+            .Select(button =>
+            {
+                TextLine? name = FindNameAbove(lines, button);
+                double score = name is null
+                    ? 0
+                    : OcrService.Similarity(OcrService.Normalize(name.Text), target);
+                return (Button: button, Name: name, Score: score);
+            })
+            .OrderByDescending(x => x.Score)
+            .ToList();
+
+        (TextLine Button, TextLine? Name, double Score) top = scored[0];
+        if (top.Score < FuzzyRoleThreshold)
+        {
+            return (null, top.Name?.Text, top.Score, null);
+        }
+
+        // 两个角色都像 → 不敢猜，让用户把名字填得更有区分度
+        if (scored.Count > 1
+            && scored[1].Score >= FuzzyRoleThreshold
+            && top.Score - scored[1].Score < 0.15)
+        {
+            return (null, top.Name?.Text, top.Score,
+                $"这一屏有两个角色都和「{character}」很像（「{top.Name?.Text}」「{scored[1].Name?.Text}」），"
+                + "先把角色名填完整一点再试。");
+        }
+
+        return (top.Button, top.Name?.Text, top.Score, null);
+    }
+
+    /// <summary>找出按钮正上方那一行文字（角色卡片的名字就在「点击登录」上方）。</summary>
+    private static TextLine? FindNameAbove(IReadOnlyList<TextLine> lines, TextLine button)
+    {
+        TextLine? best = null;
+
+        foreach (TextLine line in lines)
+        {
+            if (line == button)
+            {
+                continue;
+            }
+
+            double gap = button.CenterY - line.CenterY;
+            if (gap < 1.2 || gap > 9)
+            {
+                continue;
+            }
+
+            if (Math.Abs(line.CenterX - button.CenterX) > 10)
+            {
+                continue;
+            }
+
+            int length = OcrService.Normalize(line.Text).Length;
+            if (length is < 1 or > 10)
+            {
+                continue;
+            }
+
+            // 别把另一个按钮当成名字
+            if (OcrService.Similarity(OcrService.Normalize(line.Text), "点击登录") >= 0.6)
+            {
+                continue;
+            }
+
+            if (best is null || line.CenterY > best.CenterY)
+            {
+                best = line;
+            }
+        }
+
+        return best;
+    }
 
     /// <summary>两段文字像不像（忽略空格标点，0～1）。</summary>
     private static double Similar(string text, string target)
